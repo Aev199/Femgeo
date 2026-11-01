@@ -4,7 +4,7 @@ import { Plan, color, GRADIENT } from './plan.js';
 
 const $ = (id) => document.getElementById(id);
 const plan = new Plan($('plan'));
-const state = { result: null, current: -1, mode: 'piles', soil: 'layers', geobase: null };
+const state = { result: null, current: -1, mode: 'piles', soil: 'layers', geobase: null, layout: 'rows' };
 
 const CONCRETE = ['B15', 'B20', 'B25', 'B30', 'B35', 'B40', 'B45', 'B50', 'B55', 'B60'];
 const REBAR = ['A240', 'A400', 'A500'];
@@ -101,6 +101,7 @@ function collect() {
     soil,
     s_max: num('s-max') / 100,
     ds_rel: num('ds-rel'),
+    layout: state.layout,
   };
 }
 
@@ -253,6 +254,13 @@ for (const b of $('mode').querySelectorAll('button')) {
   };
 }
 $('rebar-dir').onchange = () => render();
+
+for (const b of $('layout').querySelectorAll('button')) {
+  b.onclick = () => {
+    state.layout = b.dataset.layout;
+    for (const x of $('layout').querySelectorAll('button')) x.classList.toggle('current', x === b);
+  };
+}
 
 for (const b of $('soil-source').querySelectorAll('button')) {
   b.onclick = () => {

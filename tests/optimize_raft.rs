@@ -64,12 +64,31 @@ fn run_with(building: Option<&femgeo::fem::condense::Building>, n: usize) -> (Ve
         rules: Rules::sp24(PileKind::Bored, d),
         soil: &soil,
         combinations: vec![lc],
-        limits: SettlementLimits { s_max: 0.15, ds_rel_max: 0.002 },
+        // Для проверки механизма рядов предел Δs/L ослаблен: ограничивает несущая способность.
+        limits: SettlementLimits { s_max: 0.15, ds_rel_max: if n == usize::MAX { 0.004 } else { 0.002 } },
         design: &design,
         rebar_axis: [1.0, 0.0, 0.0],
         raft_h: 0.8,
         building,
     };
+    if n == usize::MAX {
+        let t = std::time::Instant::now();
+        let f = p.regular(&mut |_| {}).unwrap();
+        println!("ряды за {:?}", t.elapsed());
+        for e in &f {
+            println!("свай {:2}: кг/м³ {:6.1}, Кисп {:.3}, Δs/L {:.5}", e.piles.len(), e.kg_m3, e.util_ground, e.ds_rel);
+            assert!(p.layout_violations(&e.piles).is_empty());
+            let sum: f64 = e.pile_n.iter().sum();
+            assert!((sum - Q * A * A).abs() < 1e-3 * Q * A * A);
+            // Регулярность: координаты свай образуют сетку (мало различных X и Y).
+            let mut xs: Vec<i64> = e.piles.iter().map(|&k| (p.raft.nodes[k][0] * 1000.0).round() as i64).collect();
+            let mut ys: Vec<i64> = e.piles.iter().map(|&k| (p.raft.nodes[k][1] * 1000.0).round() as i64).collect();
+            xs.sort(); xs.dedup(); ys.sort(); ys.dedup();
+            assert_eq!(xs.len() * ys.len(), e.piles.len(), "не сетка");
+        }
+        let e = f[0].clone();
+        return (f, e);
+    }
     if n == 0 {
         let grid: Vec<usize> = p.candidates().into_iter().filter(|&c| { let q = p.raft.nodes[c]; (q[0] as i64 - 1) % 2 == 0 && (q[1] as i64 - 1) % 2 == 0 }).collect();
         return (vec![], p.evaluate(&grid).unwrap());
@@ -149,4 +168,13 @@ fn building_stiffness_in_evaluation() {
     let (_, bare) = run_with(None, 0);
     println!("Δs/L: со зданием {:.5}, без {:.5} (без веса здания)", with.ds_rel, bare.ds_rel);
     assert!(with.ds_rel < bare.ds_rel, "здание должно уменьшать неравномерность осадок");
+}
+
+#[test]
+fn regular_rows_frontier() {
+    let (f, _) = run_with(None, usize::MAX);
+    assert!(f.len() >= 2 && f.iter().all(|e| e.feasible));
+    for w in f.windows(2) {
+        assert!(w[1].piles.len() < w[0].piles.len() && w[1].kg_m3 > w[0].kg_m3, "фронт не монотонен");
+    }
 }

@@ -89,6 +89,13 @@ pub struct Input {
     pub soil: SoilInput,
     pub s_max: f64,
     pub ds_rel: f64,
+    /// "rows" — рядами (по умолчанию), "free" — свободная.
+    #[serde(default = "rows")]
+    pub layout: String,
+}
+
+fn rows() -> String {
+    "rows".into()
 }
 
 impl serde::Serialize for Region {
@@ -348,7 +355,8 @@ impl Service {
         let total = input.loads.q * area + input.loads.points.iter().map(|p| p.n).sum::<f64>();
         let n_start = ((1.5 * total / pi.fd).ceil() as usize).max(4);
         progress("подбор расстановки");
-        let variants = problem.frontier(n_start, 8, &mut |e| progress(&format!("вариант: {} свай, {:.1} кг/м³", e.piles.len(), e.kg_m3)))?;
+        let mut report = |e: &crate::optimize::Evaluation| progress(&format!("вариант: {} свай, {:.1} кг/м³", e.piles.len(), e.kg_m3));
+        let variants = if input.layout == "free" { problem.frontier(n_start, 8, &mut report)? } else { problem.regular(&mut report)? };
         let out = result_json(&raft, &variants, &input);
         self.last = Some((input, raft, variants));
         Ok(out)
@@ -458,5 +466,6 @@ pub fn default_input() -> Input {
         },
         s_max: 0.15,
         ds_rel: 0.002,
+        layout: rows(),
     }
 }

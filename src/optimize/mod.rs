@@ -108,6 +108,15 @@ impl Problem<'_> {
 
     /// Расчёт варианта со сваями в узлах `piles`.
     pub fn evaluate(&self, piles: &[usize]) -> Result<Evaluation, String> {
+        self.evaluate_with(piles, true)
+    }
+
+    /// Расчёт без подбора армирования: нагрузки на сваи и осадки (`kg_m3` = NaN).
+    pub fn evaluate_fast(&self, piles: &[usize]) -> Result<Evaluation, String> {
+        self.evaluate_with(piles, false)
+    }
+
+    fn evaluate_with(&self, piles: &[usize], design: bool) -> Result<Evaluation, String> {
         let ps: Vec<Pile> = piles
             .iter()
             .map(|&n| {
@@ -159,6 +168,9 @@ impl Problem<'_> {
                     ds_rel = ds_rel.max((w[i] - w[j]).abs() / l);
                 }
             }
+            if !design {
+                continue;
+            }
             let forces: Vec<PlateForces> = m
                 .shells
                 .iter()
@@ -186,7 +198,7 @@ impl Problem<'_> {
             steel += env[e].iter().sum::<f64>() * a;
             area += a;
         }
-        let kg_m3 = steel * STEEL_DENSITY / (area * self.raft_h);
+        let kg_m3 = if design { steel * STEEL_DENSITY / (area * self.raft_h) } else { f64::NAN };
         let n_max = pile_n.iter().copied().fold(0.0, f64::max);
         let util_ground = n_max / self.pile.fd_ground;
         let util_material = n_max * self.pile.material_util_per_kn;
@@ -238,29 +250,30 @@ impl Problem<'_> {
         }
     }
 
-    /// Локальное улучшение при неизменном числе свай: самую недогруженную сваю переносим к
-    /// самой нагруженной, если вариант лучше (сначала по допустимости, затем по кг/м³).
-    fn improve(&self, cand: &[usize], mut cur: Evaluation, moves: usize) -> Result<Evaluation, String> {
+    /// Локальное улучшение при неизменном числе свай по быстрой оценке: самую недогруженную
+    /// сваю переносим к самой нагруженной, если вариант лучше (сначала по допустимости, затем
+    /// по наибольшему коэффициенту использования — выравнивание нагрузок). Возвращает полный
+    /// расчёт (с подбором армирования) итоговой расстановки.
+    fn improve(&self, cand: &[usize], piles: Vec<usize>, moves: usize) -> Result<Evaluation, String> {
         let better = |a: &Evaluation, b: &Evaluation| match (a.feasible, b.feasible) {
             (true, false) => true,
             (false, true) => false,
-            (true, true) => a.kg_m3 < b.kg_m3 * (1.0 - 1e-6),
-            (false, false) => a.worst(&self.limits) < b.worst(&self.limits) * (1.0 - 1e-6),
+            _ => a.worst(&self.limits) < b.worst(&self.limits) * (1.0 - 1e-6),
         };
+        let mut cur = self.evaluate_fast(&piles)?;
         for _ in 0..moves {
             let np = cur.piles.len();
             let mut order: Vec<usize> = (0..np).collect();
             order.sort_by(|&a, &b| cur.pile_n[a].total_cmp(&cur.pile_n[b]).then(self.xy(cur.piles[a])[1].total_cmp(&self.xy(cur.piles[b])[1])));
             let (lo, hi) = (order[0], order[np - 1]);
             let target = self.xy(cur.piles[hi]);
-            // Кандидаты у перегруженной сваи, ближайшие сначала.
             let mut near: Vec<usize> = cand.iter().copied().filter(|&c| self.spacing_ok(&cur.piles, lo, c) && !cur.piles.contains(&c)).collect();
             near.sort_by(|&a, &b| dist(self.xy(a), target).total_cmp(&dist(self.xy(b), target)));
             let mut moved = false;
             for &c in near.iter().take(3) {
                 let mut p = cur.piles.clone();
                 p[lo] = c;
-                let ev = self.evaluate(&p)?;
+                let ev = self.evaluate_fast(&p)?;
                 if better(&ev, &cur) {
                     cur = ev;
                     moved = true;
@@ -271,7 +284,7 @@ impl Problem<'_> {
                 break;
             }
         }
-        Ok(cur)
+        self.evaluate(&cur.piles)
     }
 
     /// Фронт вариантов: от начальной расстановки из ≈ `n_start` свай (больше, если она
@@ -285,14 +298,14 @@ impl Problem<'_> {
         }
         // Недопустимо — больше свай (на 10 %), пока есть место.
         let mut n = n_start;
-        let mut cur = self.improve(&cand, self.evaluate(&self.initial(&cand, n))?, moves)?;
+        let mut cur = self.improve(&cand, self.initial(&cand, n), moves)?;
         while !cur.feasible {
             let next = self.initial(&cand, (n as f64 * 1.1).ceil() as usize);
             if next.len() <= cur.piles.len() {
                 break;
             }
             n = next.len();
-            cur = self.improve(&cand, self.evaluate(&next)?, moves)?;
+            cur = self.improve(&cand, next, moves)?;
         }
         let mut out = vec![];
         loop {
@@ -320,7 +333,112 @@ impl Problem<'_> {
         order.sort_by(|&a, &b| cur.pile_n[a].total_cmp(&cur.pile_n[b]));
         let drop: std::collections::HashSet<usize> = order.into_iter().take(k.min(cur.piles.len() - 1)).collect();
         let p: Vec<usize> = cur.piles.iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, &n)| n).collect();
-        self.improve(cand, self.evaluate(&p)?, moves)
+        self.improve(cand, p, moves)
+    }
+
+    /// Расстановка рядами: начальная сетка — ряды вдоль X и Y с наименьшим шагом, кратным
+    /// шагу сетки плиты и не меньшим `min_spacing`, по центру допустимых позиций; далее по
+    /// одному снимается целый ряд или столбец — из всех вариантов снятия (быстрая оценка)
+    /// выбирается допустимый с наименьшим коэффициентом использования. Каждый шаг — вариант
+    /// фронта (с подбором армирования); в выдаче — недоминируемые по (число свай, кг/м³), по
+    /// убыванию числа свай. Если допустима не даже самая плотная сетка — она одна.
+    pub fn regular(&self, progress: &mut dyn FnMut(&Evaluation)) -> Result<Vec<Evaluation>, String> {
+        let cand = self.candidates();
+        if cand.is_empty() {
+            return Err("нет допустимых позиций свай".into());
+        }
+        let step = self.mesh_step();
+        let (x0, x1, y0, y1) = cand.iter().fold((f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY), |a, &c| {
+            let [x, y] = self.xy(c);
+            (a.0.min(x), a.1.max(x), a.2.min(y), a.3.max(y))
+        });
+        let pitch = (self.rules.min_spacing / step - 1e-9).ceil().max(1.0) * step;
+        let lines = |lo: f64, hi: f64| -> Vec<f64> {
+            let o = lo + (((hi - lo) % pitch) / 2.0 / step).floor() * step;
+            (0..).map(|i| o + i as f64 * pitch).take_while(|&v| v <= hi + 1e-9).collect()
+        };
+        let tol = 0.25 * step;
+        let layout = |xs: &[f64], ys: &[f64]| -> Vec<usize> {
+            cand.iter()
+                .copied()
+                .filter(|&c| {
+                    let [x, y] = self.xy(c);
+                    xs.iter().any(|&v| (x - v).abs() < tol) && ys.iter().any(|&v| (y - v).abs() < tol)
+                })
+                .collect()
+        };
+        let (mut xs, mut ys) = (lines(x0, x1), lines(y0, y1));
+        let mut cur = self.evaluate_fast(&layout(&xs, &ys))?;
+        if cur.piles.is_empty() {
+            return Err("ни один ряд не помещается в допустимую область".into());
+        }
+        let mut found: Vec<Evaluation> = Vec::new();
+        while cur.feasible {
+            let full = self.evaluate(&cur.piles)?;
+            progress(&full);
+            found.push(full);
+            // Варианты снятия одного ряда (X) или столбца (Y).
+            let mut best: Option<(Evaluation, Vec<f64>, Vec<f64>)> = None;
+            for axis in 0..2 {
+                let n = if axis == 0 { xs.len() } else { ys.len() };
+                if n <= 2 {
+                    continue;
+                }
+                for i in 0..n {
+                    let (mut nx, mut ny) = (xs.clone(), ys.clone());
+                    if axis == 0 { nx.remove(i); } else { ny.remove(i); }
+                    let piles = layout(&nx, &ny);
+                    if piles.len() < 3 {
+                        continue;
+                    }
+                    let ev = self.evaluate_fast(&piles)?;
+                    let better = match &best {
+                        None => true,
+                        Some((b, _, _)) => match (ev.feasible, b.feasible) {
+                            (true, false) => true,
+                            (false, true) => false,
+                            _ => ev.worst(&self.limits) < b.worst(&self.limits),
+                        },
+                    };
+                    if better {
+                        best = Some((ev, nx, ny));
+                    }
+                }
+            }
+            match best {
+                Some((ev, nx, ny)) if ev.feasible => {
+                    cur = ev;
+                    xs = nx;
+                    ys = ny;
+                }
+                _ => break,
+            }
+        }
+        if found.is_empty() {
+            return Ok(vec![self.evaluate(&cur.piles)?]);
+        }
+        // От меньшего числа свай к большему, при равном числе — меньший расход первым:
+        // вариант остаётся, только если его расход меньше всех оставленных (с меньшим числом).
+        found.sort_by(|a, b| a.piles.len().cmp(&b.piles.len()).then(a.kg_m3.total_cmp(&b.kg_m3)));
+        let mut out: Vec<Evaluation> = Vec::new();
+        for e in found {
+            if out.last().is_none_or(|o| o.piles.len() != e.piles.len() && e.kg_m3 < o.kg_m3 * (1.0 - 1e-9)) {
+                out.push(e);
+            }
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// Шаг сетки плиты: наименьшая ненулевая длина ребра элементов.
+    fn mesh_step(&self) -> f64 {
+        self.raft
+            .shells
+            .iter()
+            .flat_map(|s| (0..s.nodes.len()).map(move |i| (s.nodes[i], s.nodes[(i + 1) % s.nodes.len()])))
+            .map(|(a, b)| dist(self.xy(a), self.xy(b)))
+            .filter(|&d| d > 1e-9)
+            .fold(f64::INFINITY, f64::min)
     }
 
     /// Нарушения правил расстановки варианта (проверка результата).
