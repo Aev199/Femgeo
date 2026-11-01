@@ -44,7 +44,8 @@ fn punching_governs_thin_raft() {
     let mut i = small(&mut s);
     i["raft"]["h"] = json!(0.3);
     i["raft"]["cover"] = json!(0.05);
-    i["acrc_lim"] = json!(0.0);
+    i["acrc_long"] = json!(0.0);
+    i["acrc_short"] = json!(0.0);
     let out = run(&mut s, i.clone());
     let v = &out["variants"][0];
     println!("h = 0,3: Кисп продавливания {}", v["util_punch"]);
@@ -66,9 +67,11 @@ fn crack_limit_raises_rebar() {
     let mut s = Service::new();
     let mut i = small(&mut s);
     i["raft"]["h"] = json!(0.6);
-    i["acrc_lim"] = json!(0.0);
+    i["acrc_long"] = json!(0.0);
+    i["acrc_short"] = json!(0.0);
     let a = run(&mut s, i.clone())["variants"][0]["kg_m3"].as_f64().unwrap();
-    i["acrc_lim"] = json!(0.1);
+    i["acrc_long"] = json!(0.1);
+    i["acrc_short"] = json!(0.1);
     let b = run(&mut s, i)["variants"][0]["kg_m3"].as_f64().unwrap();
     println!("кг/м³: без ПС2 {a:.1}, a_crc ≤ 0,1 мм {b:.1}");
     assert!(b > a);
@@ -81,7 +84,8 @@ fn existing_piles_are_a_guide() {
     let mut s = Service::new();
     let mut i = small(&mut s);
     i["layout"] = json!("free");
-    i["acrc_lim"] = json!(0.0);
+    i["acrc_long"] = json!(0.0);
+    i["acrc_short"] = json!(0.0);
     // Существующие: сетка 2,5 м со сдвигом (не в узлах сетки плиты).
     let ex: Vec<[f64; 2]> = (0..5).flat_map(|a| (0..5).map(move |b| [1.2 + 2.4 * a as f64, 1.1 + 2.45 * b as f64])).collect();
     i["existing"] = json!(ex);
@@ -96,4 +100,30 @@ fn existing_piles_are_a_guide() {
     assert!(free["variants"][0]["reference"].as_bool() == Some(false));
     println!("смещение от существующих (с ориентиром): {with:?}");
     assert!(with[0] < 1.0, "старт свободного режима — существующие сваи");
+}
+
+/// Сочетания СП 20: сумма реакций свай наиболее нагруженного сочетания = наибольшая расчётная
+/// нагрузка (постоянная ×1,1 + ведущая кратковременная ×1,2, вторая ×1,2·0,9 и т. д.).
+#[test]
+fn piles_carry_governing_uls_combination() {
+    let mut s = Service::new();
+    let mut i = small(&mut s);
+    i["acrc_long"] = json!(0.0);
+    i["acrc_short"] = json!(0.0);
+    i["cases"] = json!([
+        { "name": "П", "kind": "permanent", "gamma_f": 1.1, "q": 100.0 },
+        { "name": "К1", "kind": "short", "gamma_f": 1.2, "psi_long": 0.35, "q": 20.0, "points": [{ "x": 6.0, "y": 6.0, "n": 500.0 }] },
+        { "name": "К2", "kind": "short", "gamma_f": 1.4, "psi_long": 0.0, "q": 10.0 }
+    ]);
+    let out = run(&mut s, i);
+    let v = &out["variants"][0];
+    let area = 144.0;
+    let k1 = 20.0 * area + 500.0;
+    let k2 = 10.0 * area;
+    let expected = 1.1 * 100.0 * area + f64::max(1.2 * k1 + 0.9 * 1.4 * k2, 1.4 * k2 + 0.9 * 1.2 * k1);
+    // Наибольшая реакция каждой сваи — по своему сочетанию; сумма не меньше нагрузки
+    // определяющего сочетания и не больше суммы по всем.
+    let sum: f64 = v["piles"].as_array().unwrap().iter().map(|p| p["n"].as_f64().unwrap()).sum();
+    println!("Σ N = {sum:.0}, определяющее сочетание {expected:.0}");
+    assert!(sum >= expected * (1.0 - 1e-6) && sum <= expected * 1.05);
 }

@@ -45,10 +45,11 @@
         </div>
       </section>
       <section class="gb-section">
-        <h3>Нагрузки, расчётные</h3>
-        <label class="field">Равномерная с весом плиты, кПа <input id="q" type="number" step="any"></label>
-        <label class="field">Сосредоточенные: X Y N, м и кН
-          <textarea id="points" rows="3" spellcheck="false" placeholder="нет"></textarea></label>
+        <h3>Загружения, нормативные</h3>
+        <label class="field" title="Вид: П — постоянное, Д — длительное, К — кратковременное; ψдл — длительная доля кратковременного (СП 20). Сочетания по СП 20, п. 6.4">Вид γf ψдл q (кПа), по строкам
+          <textarea id="cases" rows="3" spellcheck="false"></textarea></label>
+        <label class="field">Сосредоточенные: № загружения X Y N (м, кН)
+          <textarea id="points" rows="2" spellcheck="false" placeholder="нет"></textarea></label>
       </section>
       <section class="gb-section">
         <h3>Сваи</h3>
@@ -98,8 +99,8 @@
         <div class="grid2">
           <label class="field">Осадка, см <input id="s-max" type="number" step="any" min="1"></label>
           <label class="field">Разность Δs/L <input id="ds-rel" type="number" step="any" min="0.0005"></label>
-          <label class="field" title="Нормативные усилия = расчётные / γf">γf средний (ПС2) <input id="gamma-f" type="number" step="any" min="1"></label>
-          <label class="field" title="Непродолжительное раскрытие; 0 — без ПС2">aсrc, мм <input id="acrc" type="number" step="any" min="0"></label>
+          <label class="field" title="Продолжительное раскрытие трещин (СП 63, п. 8.2.6); 0 — без проверки">acrc прод., мм <input id="acrc-long" type="number" step="any" min="0"></label>
+          <label class="field" title="Непродолжительное раскрытие трещин (СП 63, п. 8.2.6); 0 — без проверки">acrc непрод., мм <input id="acrc-short" type="number" step="any" min="0"></label>
         </div>
         <label class="check"><input type="checkbox" id="punching" checked> Продавливание плиты сваями, без поперечной арматуры</label>
       </section>

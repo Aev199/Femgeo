@@ -43,8 +43,14 @@ pub struct Problem<'a> {
     pub region: Region,
     pub rules: Rules,
     pub soil: &'a (dyn Fn(f64, f64) -> SoilColumn + Sync),
-    /// Расчётные сочетания (ПС1) — нагрузки на плиту.
-    pub combinations: Vec<LoadCase>,
+    /// Загружения плиты (нормативные значения) и сочетания — коэффициенты к загружениям
+    /// (`loads::combinations`): ПС1 — нагрузки на сваи и армирование; ПС2 полные — осадки
+    /// и раскрытие трещин непродолжительное; ПС2 длительное — длительное раскрытие. Пустые
+    /// ПС2 — осадки по ПС1.
+    pub cases: Vec<LoadCase>,
+    pub uls: Vec<Vec<f64>>,
+    pub sls: Vec<Vec<f64>>,
+    pub sls_long: Option<Vec<f64>>,
     pub limits: SettlementLimits,
     /// Подбор армирования плиты (ПС1) и ось x армирования.
     pub design: &'a UlsContext,
@@ -52,10 +58,12 @@ pub struct Problem<'a> {
     /// Толщина плиты, м (для кг/м³).
     pub raft_h: f64,
     /// Надземная часть, сконденсированная на плиту (`fem::condense::building`); приведённые
-    /// нагрузки — по одному набору на сочетание. None — здание не учитывается.
+    /// нагрузки — по одному набору на загружение. None — здание не учитывается.
     pub building: Option<&'a Building>,
-    /// Подбор по ПС2 (трещины): контекст и средний γf (нормативные усилия = расчётные / γf).
-    pub sls: Option<(&'a SlsContext, f64)>,
+    /// Трещины: непродолжительное раскрытие (полные сочетания ПС2) и продолжительное
+    /// (длительное сочетание); контексты задают φ1 и предел.
+    pub crack_short: Option<&'a SlsContext>,
+    pub crack_long: Option<&'a SlsContext>,
     /// Продавливание плиты сваями (пп. 8.1.46–8.1.47 СП 63, без поперечной арматуры; у края — доля замкнутого контура внутри плиты (упрощение двух вариантов контура п. 8.1.47)).
     pub punching: Option<Punching>,
     /// Существующие сваи (ориентир, не правило): старт свободного режима и предпочтение
@@ -150,20 +158,32 @@ impl Problem<'_> {
         let k = field.stiffness()?;
         let mut m = self.raft.clone();
         m.spring_groups.push(SpringGroup { nodes: piles.to_vec(), k: k.clone() });
-        let mut combinations = self.combinations.clone();
+        let mut cases = self.cases.clone();
         if let Some(b) = self.building {
-            if b.loads.len() != combinations.len() {
-                return Err("здание: число наборов приведённых нагрузок не равно числу сочетаний".into());
+            if b.loads.len() != cases.len() {
+                return Err("здание: число наборов приведённых нагрузок не равно числу загружений".into());
             }
             m.blocks.push(b.block.clone());
             for &d in b.block.dofs.iter().step_by(3) {
                 m.fixed.push((d / 6, [true, true, false, false, false, true]));
             }
-            for (lc, extra) in combinations.iter_mut().zip(&b.loads) {
+            for (lc, extra) in cases.iter_mut().zip(&b.loads) {
                 lc.nodal.extend(extra.iter().copied());
             }
         }
         let lin = m.factorize()?;
+        let u_cases: Vec<Vec<f64>> = cases.iter().map(|lc| lin.solve(&m, lc)).collect::<Result<_, _>>()?;
+        let combine = |c: &[f64]| -> Vec<f64> {
+            let mut u = vec![0.0; m.ndof()];
+            for (f, uc) in c.iter().zip(&u_cases) {
+                if *f != 0.0 {
+                    for (a, b) in u.iter_mut().zip(uc) {
+                        *a += f * b;
+                    }
+                }
+            }
+            u
+        };
         let np = piles.len();
         let mut pile_n = vec![0.0f64; np];
         let mut s_max: f64 = 0.0;
@@ -172,29 +192,8 @@ impl Problem<'_> {
         let mut env = vec![[0.0f64; 4]; ne];
         let mut w_nodes = vec![0.0f64; m.nodes.len()];
         let mut impossible = false;
-        for lc in &combinations {
-            let u = lin.solve(&m, lc)?;
-            let w: Vec<f64> = piles.iter().map(|&n| u[6 * n + 2]).collect();
-            let s_lc = w.iter().map(|x| -x).fold(0.0, f64::max);
-            if s_lc >= s_max {
-                w_nodes = (0..m.nodes.len()).map(|n| -u[6 * n + 2]).collect();
-            }
-            for i in 0..np {
-                // Реакция сваи R = −K·w (сжатие — положительное).
-                let r: f64 = -(0..np).map(|j| k[i * np + j] * w[j]).sum::<f64>();
-                pile_n[i] = pile_n[i].max(r);
-                s_max = s_max.max(-w[i]);
-                for j in i + 1..np {
-                    let [a, b] = [self.xy(piles[i]), self.xy(piles[j])];
-                    let l = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
-                    ds_rel = ds_rel.max((w[i] - w[j]).abs() / l);
-                }
-            }
-            if !design {
-                continue;
-            }
-            let forces: Vec<PlateForces> = m
-                .shells
+        let forces_of = |u: &[f64]| -> Vec<PlateForces> {
+            m.shells
                 .iter()
                 .map(|s| {
                     let c: Vec<V3> = s.nodes.iter().map(|&n| m.nodes[n]).collect();
@@ -203,22 +202,54 @@ impl Problem<'_> {
                     let f = fem::shell::rotate_forces(&r, &f, self.rebar_axis);
                     PlateForces { nx: f[0], ny: f[1], nxy: f[2], mx: f[3], my: f[4], mxy: f[5] }
                 })
-                .collect();
-            let mut designs = capra_maury::design_uls_batch(self.design, &forces, 10.0);
-            if let Some((ctx, gamma_f)) = self.sls {
-                let service: Vec<PlateForces> = forces
-                    .iter()
-                    .map(|f| PlateForces { nx: f.nx / gamma_f, ny: f.ny / gamma_f, nxy: f.nxy / gamma_f, mx: f.mx / gamma_f, my: f.my / gamma_f, mxy: f.mxy / gamma_f })
-                    .collect();
-                designs.extend(capra_maury::design_sls_batch(ctx, &service, 10.0));
-            }
-            for (i, d) in designs.iter().enumerate() {
-                let e = i % ne;
+                .collect()
+        };
+        let mut add = |designs: &[capra_maury::Design], env: &mut Vec<[f64; 4]>| {
+            for (e, d) in designs.iter().enumerate() {
                 impossible |= !d.feasible();
                 let a = [d.top.asx, d.top.asy, d.bottom.asx, d.bottom.asy];
                 for k in 0..4 {
                     env[e][k] = env[e][k].max(a[k]);
                 }
+            }
+        };
+        // ПС1: нагрузки на сваи (R = −K·w, сжатие — положительное) и армирование.
+        for c in &self.uls {
+            let u = combine(c);
+            let w: Vec<f64> = piles.iter().map(|&n| u[6 * n + 2]).collect();
+            for i in 0..np {
+                let r: f64 = -(0..np).map(|j| k[i * np + j] * w[j]).sum::<f64>();
+                pile_n[i] = pile_n[i].max(r);
+            }
+            if design {
+                add(&capra_maury::design_uls_batch(self.design, &forces_of(&u), 10.0), &mut env);
+            }
+        }
+        // ПС2: осадки и разность осадок; непродолжительное раскрытие трещин.
+        let settle = if self.sls.is_empty() { &self.uls } else { &self.sls };
+        for c in settle {
+            let u = combine(c);
+            let w: Vec<f64> = piles.iter().map(|&n| u[6 * n + 2]).collect();
+            let s_lc = w.iter().map(|x| -x).fold(0.0, f64::max);
+            if s_lc >= s_max {
+                w_nodes = (0..m.nodes.len()).map(|n| -u[6 * n + 2]).collect();
+            }
+            for i in 0..np {
+                s_max = s_max.max(-w[i]);
+                for j in i + 1..np {
+                    let l = dist(self.xy(piles[i]), self.xy(piles[j]));
+                    ds_rel = ds_rel.max((w[i] - w[j]).abs() / l);
+                }
+            }
+            if design {
+                if let Some(ctx) = self.crack_short {
+                    add(&capra_maury::design_sls_batch(ctx, &forces_of(&u), 10.0), &mut env);
+                }
+            }
+        }
+        if design {
+            if let (Some(ctx), Some(c)) = (self.crack_long, &self.sls_long) {
+                add(&capra_maury::design_sls_batch(ctx, &forces_of(&combine(c)), 10.0), &mut env);
             }
         }
         let (mut steel, mut area) = (0.0, 0.0);

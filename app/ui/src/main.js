@@ -61,8 +61,9 @@ function fill(input) {
   $('raft-h').value = r.h; $('raft-z').value = r.z_bottom; $('raft-mesh').value = r.mesh;
   $('raft-cover').value = r.cover; $('raft-concrete').value = r.concrete; $('raft-rebar').value = r.rebar;
   $('raft-bar').value = Math.round(r.bar_d * 1000);
-  $('q').value = input.loads.q;
-  $('points').value = writeRows(input.loads.points.map((x) => [x.x, x.y, x.n]));
+  const KIND = { permanent: 'П', long: 'Д', short: 'К' };
+  $('cases').value = input.cases.map((c) => [KIND[c.kind], c.gamma_f, c.psi_long, c.q].join(' ')).join('\n');
+  $('points').value = writeRows(input.cases.flatMap((c, i) => c.points.map((x) => [i + 1, x.x, x.y, x.n])));
   $('pile-d').value = p.d; $('pile-l').value = p.length; $('pile-fd').value = p.fd; $('pile-kind').value = p.kind;
   $('pile-concrete').value = p.concrete; $('pile-rebar').value = p.rebar; $('pile-bars').value = p.bars;
   $('pile-bar').value = Math.round(p.bar_d * 1000); $('pile-cover').value = p.cover; $('pile-l0').value = p.l0;
@@ -72,8 +73,28 @@ function fill(input) {
     $('layers').value = writeRows(input.soil.layers.map((l) => [l.bottom, l.e, l.nu]));
   }
   $('s-max').value = Math.round(input.s_max * 100); $('ds-rel').value = input.ds_rel;
-  $('gamma-f').value = input.gamma_f; $('acrc').value = input.acrc_lim; $('punching').checked = input.punching;
+  $('acrc-long').value = input.acrc_long; $('acrc-short').value = input.acrc_short; $('punching').checked = input.punching;
   $('existing').value = writeRows(input.existing);
+}
+
+function collectCases() {
+  const KIND = { 'П': 'permanent', 'Д': 'long', 'К': 'short' };
+  const lines = $('cases').value.split('\n').map((l) => l.trim()).filter((l) => l);
+  const cases = lines.map((l, i) => {
+    const [k, ...rest] = l.split(/\s+/);
+    const v = rest.map((x) => Number(x.replace(',', '.')));
+    if (!KIND[k.toUpperCase()] || v.length !== 3 || v.some((x) => !Number.isFinite(x))) {
+      $('cases').classList.add('invalid');
+      throw new Error(`Загружение ${i + 1}: «вид γf ψдл q», вид — П, Д или К`);
+    }
+    return { name: `${i + 1}`, kind: KIND[k.toUpperCase()], gamma_f: v[0], psi_long: v[1], q: v[2], points: [] };
+  });
+  if (!cases.length) throw new Error('Задайте хотя бы одно загружение');
+  for (const [n, x, y, f] of table('points', 4, 'Сосредоточенные нагрузки')) {
+    if (!cases[n - 1]) throw new Error(`Сосредоточенная нагрузка: нет загружения ${n}`);
+    cases[n - 1].points.push({ x, y, n: f });
+  }
+  return cases;
 }
 
 function collect() {
@@ -94,7 +115,7 @@ function collect() {
       outline, holes: rings('holes'), h: num('raft-h'), z_bottom: num('raft-z'), mesh: num('raft-mesh'),
       concrete: $('raft-concrete').value, rebar: $('raft-rebar').value, cover: num('raft-cover'), bar_d: num('raft-bar') / 1000,
     },
-    loads: { q: num('q'), points: table('points', 3, 'Сосредоточенные нагрузки').map(([x, y, n]) => ({ x, y, n })) },
+    cases: collectCases(),
     pile: {
       d: num('pile-d'), length: num('pile-l'), fd: num('pile-fd'), kind: $('pile-kind').value,
       concrete: $('pile-concrete').value, rebar: $('pile-rebar').value, bars: num('pile-bars'), bar_d: num('pile-bar') / 1000,
@@ -104,8 +125,8 @@ function collect() {
     s_max: num('s-max') / 100,
     ds_rel: num('ds-rel'),
     layout: state.layout,
-    gamma_f: num('gamma-f'),
-    acrc_lim: num('acrc'),
+    acrc_long: num('acrc-long'),
+    acrc_short: num('acrc-short'),
     punching: $('punching').checked,
     existing: table('existing', 2, 'Существующие сваи'),
   };

@@ -40,9 +40,17 @@ pub struct PointLoad {
     pub n: f64,
 }
 
+/// Загружение плиты (нормативные значения).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LoadsInput {
-    /// Расчётная равномерная нагрузка на плиту, кПа (вниз — положительная), включая вес плиты.
+pub struct CaseInput {
+    pub name: String,
+    /// "permanent" | "long" | "short".
+    pub kind: String,
+    pub gamma_f: f64,
+    /// Длительная доля кратковременной нагрузки (СП 20); для остальных не используется.
+    #[serde(default)]
+    pub psi_long: f64,
+    /// Равномерная нагрузка, кПа (вниз — положительная).
     pub q: f64,
     #[serde(default)]
     pub points: Vec<PointLoad>,
@@ -81,7 +89,7 @@ pub enum SoilInput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Input {
     pub raft: RaftInput,
-    pub loads: LoadsInput,
+    pub cases: Vec<CaseInput>,
     pub pile: PileInput,
     /// Допустимая область свай; None — контур плиты.
     #[serde(default)]
@@ -92,12 +100,12 @@ pub struct Input {
     /// "rows" — рядами (по умолчанию), "free" — свободная.
     #[serde(default = "rows")]
     pub layout: String,
-    /// Средний коэффициент надёжности по нагрузке: нормативные = расчётные / γf (ПС2).
-    #[serde(default = "gamma_f")]
-    pub gamma_f: f64,
-    /// Предельная ширина раскрытия трещин (непродолжительная), мм; 0 — без ПС2.
-    #[serde(default = "acrc_lim")]
-    pub acrc_lim: f64,
+    /// Предельная ширина раскрытия трещин, мм (п. 8.2.6 СП 63): продолжительное и
+    /// непродолжительное; 0 — без проверки.
+    #[serde(default = "acrc_long")]
+    pub acrc_long: f64,
+    #[serde(default = "acrc_short")]
+    pub acrc_short: f64,
     /// Проверять продавливание плиты сваями.
     #[serde(default = "yes")]
     pub punching: bool,
@@ -106,11 +114,11 @@ pub struct Input {
     pub existing: Vec<[f64; 2]>,
 }
 
-fn gamma_f() -> f64 {
-    1.15
-}
-fn acrc_lim() -> f64 {
+fn acrc_long() -> f64 {
     0.3
+}
+fn acrc_short() -> f64 {
+    0.4
 }
 fn yes() -> bool {
     true
@@ -315,12 +323,31 @@ impl Service {
         let raft = raft_model(r, c_uls.eb)?;
         progress("сетка плиты");
 
-        // Нагрузка: давление на все элементы, сосредоточенные силы — в ближайший узел.
-        let mut lc = LoadCase { pressure: (0..raft.shells.len()).map(|s| (s, -input.loads.q)).collect(), ..Default::default() };
-        for p in &input.loads.points {
-            let k = (0..raft.nodes.len()).min_by(|&a, &b| dist2(raft.nodes[a], [p.x, p.y, 0.0]).total_cmp(&dist2(raft.nodes[b], [p.x, p.y, 0.0]))).unwrap();
-            lc.nodal.push((k, [0.0, 0.0, -p.n, 0.0, 0.0, 0.0]));
+        // Загружения: давление на все элементы, сосредоточенные силы — в ближайший узел.
+        if input.cases.is_empty() {
+            return Err("нет загружений".into());
         }
+        let mut cases = Vec::new();
+        let mut kinds = Vec::new();
+        for c in &input.cases {
+            let kind = match c.kind.as_str() {
+                "permanent" => crate::loads::Kind::Permanent,
+                "long" => crate::loads::Kind::Long,
+                "short" => crate::loads::Kind::Short,
+                k => return Err(format!("загружение «{}»: неизвестный вид «{k}»", c.name)),
+            };
+            if !(c.gamma_f >= 1.0) {
+                return Err(format!("загружение «{}»: γf должен быть не меньше 1", c.name));
+            }
+            kinds.push(crate::loads::Case { kind, gamma_f: c.gamma_f, psi_long: c.psi_long.clamp(0.0, 1.0) });
+            let mut lc = LoadCase { pressure: (0..raft.shells.len()).map(|s| (s, -c.q)).collect(), ..Default::default() };
+            for p in &c.points {
+                let k = (0..raft.nodes.len()).min_by(|&a, &b| dist2(raft.nodes[a], [p.x, p.y, 0.0]).total_cmp(&dist2(raft.nodes[b], [p.x, p.y, 0.0]))).unwrap();
+                lc.nodal.push((k, [0.0, 0.0, -p.n, 0.0, 0.0, 0.0]));
+            }
+            cases.push(lc);
+        }
+        let combos = crate::loads::combinations(&kinds);
 
         let pi = &input.pile;
         let kind = match pi.kind.as_str() {
@@ -347,18 +374,20 @@ impl Service {
 
         let psec = PlateSection { h: r.h, a_top: r.cover, a_bot: r.cover, ds_x: r.bar_d, ds_y: r.bar_d, concrete_diagram: ConcreteDiagramType::L3 };
         let design = UlsContext::new(&psec, &c_uls, &r_uls);
-        if !(input.gamma_f >= 1.0) {
-            return Err("γf должен быть не меньше 1".into());
-        }
-        let sls_ctx = (input.acrc_lim > 0.0).then(|| {
-            SlsContext::new(
-                &psec,
-                &cc.chars(CalcType::Sls),
-                &rebar(&r.rebar).expect("проверено").chars(CalcType::Sls),
-                Some((&c_uls, &r_uls)),
-                SlsOptions { acrc_lim_mm: input.acrc_lim, ..Default::default() },
-            )
-        });
+        // Трещины (п. 8.2.6 СП 63), φ1 = 1,4: продолжительное — длительное сочетание;
+        // непродолжительное — полные сочетания (верхняя оценка acrc1 + acrc2 − acrc3).
+        let crack = |lim: f64| {
+            (lim > 0.0).then(|| {
+                SlsContext::new(
+                    &psec,
+                    &cc.chars(CalcType::Sls),
+                    &rebar(&r.rebar).expect("проверено").chars(CalcType::Sls),
+                    Some((&c_uls, &r_uls)),
+                    SlsOptions { acrc_lim_mm: lim, phi1: 1.4, ..Default::default() },
+                )
+            })
+        };
+        let (crack_long, crack_short) = (crack(input.acrc_long), crack(input.acrc_short));
         let soil = self.soil_fn(&input.soil)?;
         let region = input.region.clone().unwrap_or(Region { outer: r.outline.clone(), holes: r.holes.clone() });
         let problem = Problem {
@@ -374,19 +403,28 @@ impl Service {
             region,
             rules,
             soil: soil.as_ref(),
-            combinations: vec![lc],
+            cases,
+            uls: combos.uls.clone(),
+            sls: combos.sls.clone(),
+            sls_long: Some(combos.sls_long.clone()),
             limits: SettlementLimits { s_max: input.s_max, ds_rel_max: input.ds_rel },
             design: &design,
             rebar_axis: [1.0, 0.0, 0.0],
             raft_h: r.h,
             building: None,
-            sls: sls_ctx.as_ref().map(|c| (c, input.gamma_f)),
+            crack_short: crack_short.as_ref(),
+            crack_long: crack_long.as_ref(),
             punching: input.punching.then(|| Punching { rbt: c_uls.rbt, h0: r.h - r.cover, raft: Region { outer: r.outline.clone(), holes: r.holes.clone() } }),
             existing: input.existing.clone(),
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
         let area: f64 = polygon_area(&r.outline) - r.holes.iter().map(|h| polygon_area(h)).sum::<f64>();
-        let total = input.loads.q * area + input.loads.points.iter().map(|p| p.n).sum::<f64>();
+        // Наибольшая суммарная расчётная нагрузка по сочетаниям ПС1.
+        let total = combos
+            .uls
+            .iter()
+            .map(|c| c.iter().zip(&input.cases).map(|(f, k)| f * (k.q * area + k.points.iter().map(|p| p.n).sum::<f64>())).sum::<f64>())
+            .fold(0.0, f64::max);
         let n_start = ((1.5 * total / pi.fd).ceil() as usize).max(4);
         progress("подбор расстановки");
         let mut report = |e: &crate::optimize::Evaluation| progress(&format!("вариант: {} свай, {:.1} кг/м³", e.piles.len(), e.kg_m3));
@@ -488,7 +526,10 @@ pub fn default_input() -> Input {
             cover: 0.06,
             bar_d: 0.02,
         },
-        loads: LoadsInput { q: 200.0, points: vec![] },
+        cases: vec![
+            CaseInput { name: "Собственный вес и постоянные".into(), kind: "permanent".into(), gamma_f: 1.1, psi_long: 0.0, q: 130.0, points: vec![] },
+            CaseInput { name: "Полезная".into(), kind: "short".into(), gamma_f: 1.2, psi_long: 0.35, q: 30.0, points: vec![] },
+        ],
         pile: PileInput {
             d: 0.6,
             length: 16.0,
@@ -511,8 +552,8 @@ pub fn default_input() -> Input {
         s_max: 0.15,
         ds_rel: 0.002,
         layout: rows(),
-        gamma_f: gamma_f(),
-        acrc_lim: acrc_lim(),
+        acrc_long: acrc_long(),
+        acrc_short: acrc_short(),
         punching: true,
         existing: vec![],
     }
