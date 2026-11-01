@@ -22,7 +22,7 @@ fn soil_averaging() {
     assert!((nu - 0.3).abs() < 1e-12);
 }
 
-/// Формула п. 7.4.3 по шагам, вручную.
+/// Длинная висячая свая (κ ≥ 7,5): формулы (7.34)–(7.37) СП 24.13330.2021 по шагам.
 #[test]
 fn single_pile_formula() {
     let p = pile(0.0, 0.0);
@@ -33,7 +33,8 @@ fn single_pile_formula() {
     let ar = 0.17 * (kv * 15.0 / 0.6).ln();
     let chi = p.ea / (g1 * 225.0);
     let l1 = 2.12 * chi.powf(0.75) / (1.0 + 2.12 * chi.powf(0.75));
-    let beta = br / l1 + (1.0 - br / ar) / chi;
+    let beta = br / l1 + 0.3 * (1.0 - br / ar) / chi;
+    assert!(sp.kappa >= 7.5);
     assert!((sp.beta - beta).abs() < 1e-12);
     assert!((sp.compliance - beta / (g1 * 15.0)).abs() < 1e-15);
     assert!(sp.warnings.is_empty());
@@ -142,4 +143,21 @@ fn layout_invariance() {
         k
     };
     assert_eq!(key(layout::violations(&reg, &r, &pts)), key(layout::violations(&reg2, &r, &pts2)));
+}
+
+/// Короткая свая на слабодеформируемом основании (κ < 7,5): (7.38) и таблица 7.18.
+#[test]
+fn short_pile_formula() {
+    let soil = SoilColumn { top: 0.0, layers: vec![Layer { bottom: -7.0, e: 20_000.0, nu: 0.3 }, Layer { bottom: -60.0, e: 300_000.0, nu: 0.3 }] };
+    let d: f64 = 0.6;
+    let p = Pile { x: 0.0, y: 0.0, head: -1.0, length: 6.0, d, ea: 3e7 * std::f64::consts::PI * d * d / 4.0 };
+    let sp = SinglePile::new(&p, &soil);
+    let (g1, g2) = (20_000.0 / 2.6, 300_000.0 / 2.6);
+    let kappa = g1 * 6.0 / (g2 * d);
+    assert!((sp.kappa - kappa).abs() < 1e-12 && kappa < 7.5);
+    // ν = 0,3: ζ0 = 0,34, mν = 1,607 (таблица 7.18); ζ0 совпадает с (1 − 2ν)/(2·ln(3 − 4ν)).
+    assert!((0.4f64 / (2.0 * 1.8f64.ln()) - 0.34).abs() < 0.001);
+    let zeta = 0.34 / (1.0 + kappa / 1.607);
+    assert!((sp.compliance - zeta / (g2 * d)).abs() < 1e-15);
+    assert!(sp.beta.is_nan());
 }
