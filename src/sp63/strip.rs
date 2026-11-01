@@ -6,6 +6,8 @@
 //!
 //! Знаки: «+» N — растяжение, «+» M растягивает грань +Z (верх); ε(z) = ε₀ + κ·z.
 
+use std::sync::Arc;
+
 use super::diagram::Diagram;
 use super::materials::StripLimits;
 
@@ -44,30 +46,45 @@ const GAUSS_W1: f64 = 5.0 / 9.0;
 pub struct StripSection {
     pub h: f64,
     pub rows: Vec<StripRow>,
-    pub concrete: Diagram,
-    pub rebar: Diagram,
-    breaks: Vec<f64>,
+    /// Диаграммы разделяются между копиями полосы (подбор меняет только площади рядов).
+    pub concrete: Arc<Diagram>,
+    pub rebar: Arc<Diagram>,
+    breaks: Arc<[f64]>,
 }
+
+/// Наибольшее число узлов разбиения толщины (узлы диаграммы бетона и ноль).
+const MAX_BREAKS: usize = 30;
 
 impl StripSection {
     pub fn new(h: f64, rows: Vec<StripRow>, concrete: Diagram, rebar: Diagram) -> Self {
+        Self::shared(h, rows, Arc::new(concrete), Arc::new(rebar))
+    }
+
+    /// Полоса с уже разделяемыми диаграммами.
+    pub fn shared(h: f64, rows: Vec<StripRow>, concrete: Arc<Diagram>, rebar: Arc<Diagram>) -> Self {
         assert!(h > 0.0, "толщина полосы должна быть положительной");
         let mut breaks: Vec<f64> = vec![0.0];
         breaks.extend_from_slice(concrete.compression.xs());
         breaks.extend_from_slice(concrete.tension.xs());
         breaks.sort_by(f64::total_cmp);
         breaks.dedup();
-        Self { h, rows, concrete, rebar, breaks }
+        assert!(breaks.len() <= MAX_BREAKS, "слишком много узлов диаграммы бетона");
+        Self { h, rows, concrete, rebar, breaks: breaks.into() }
     }
 
     /// Та же полоса с другими площадями рядов.
     pub fn with_areas(&self, areas: &[f64]) -> Self {
-        assert_eq!(areas.len(), self.rows.len(), "число площадей не совпадает с числом рядов");
         let mut s = self.clone();
-        for (r, &a) in s.rows.iter_mut().zip(areas) {
+        s.set_areas(areas);
+        s
+    }
+
+    /// Задать площади рядов на месте.
+    pub fn set_areas(&mut self, areas: &[f64]) {
+        assert_eq!(areas.len(), self.rows.len(), "число площадей не совпадает с числом рядов");
+        for (r, &a) in self.rows.iter_mut().zip(areas) {
             r.as_ = a;
         }
-        s
     }
 
     /// Усилия и касательная матрица при плоскости деформаций (ε₀, κ).
@@ -80,18 +97,23 @@ impl StripSection {
         let gx = (3.0f64 / 5.0).sqrt();
         let mut r = StripResponse::default();
 
-        let mut zs: Vec<f64> = Vec::with_capacity(self.breaks.len() + 2);
-        zs.push(-half);
+        let mut buf = [0.0f64; MAX_BREAKS + 2];
+        let mut count = 0;
+        buf[count] = -half;
+        count += 1;
         if kappa.abs() * h > 1e-14 {
-            for &e in &self.breaks {
+            for &e in self.breaks.iter() {
                 let z = (e - eps0) / kappa;
                 if z > -half && z < half {
-                    zs.push(z);
+                    buf[count] = z;
+                    count += 1;
                 }
             }
         }
-        zs.push(half);
-        zs.sort_by(f64::total_cmp);
+        buf[count] = half;
+        count += 1;
+        let zs = &mut buf[..count];
+        zs.sort_unstable_by(f64::total_cmp);
 
         let add_concrete = |z: f64, w: f64, r: &mut StripResponse| {
             let (sig, e2) = self.concrete.sig(eps0 + kappa * z, tension_concrete, true);
@@ -741,6 +763,9 @@ impl UlsTable {
             return (0.0, pivot);
         }
         let (du, dv) = (tu / tr, tv / tr);
+        if self.z.len() == 2 && areas.len() == 2 {
+            return self.eta_two_rows(areas[0], areas[1], du, dv, tr);
+        }
         let n_rows = self.z.len();
         let count = self.nc.len();
         let mut best = f64::INFINITY;
@@ -774,6 +799,50 @@ impl UlsTable {
             pu0 = u;
             pv0 = v;
         }
+        if !best.is_finite() {
+            return (f64::MAX, pivot);
+        }
+        let lambda = best / tr;
+        (if lambda > 1e-12 { 1.0 / lambda } else { f64::MAX }, pivot)
+    }
+
+    /// То же для двух рядов: те же операции в том же порядке, без `%` и проверок границ.
+    fn eta_two_rows(&self, a0: f64, a1: f64, du: f64, dv: f64, tr: f64) -> (f64, Pivot) {
+        let (z0, z1) = (self.z[0], self.z[1]);
+        let sc = self.sc;
+        let count = self.nc.len();
+        let point = |i: usize| -> (f64, f64) {
+            let f0 = self.sig[2 * i] * a0;
+            let f1 = self.sig[2 * i + 1] * a1;
+            let mut nn = self.nc[i];
+            let mut mm = self.mc[i];
+            nn += f0;
+            mm += f0 * z0;
+            nn += f1;
+            mm += f1 * z1;
+            (nn * sc, mm)
+        };
+        let (mut pu0, mut pv0) = point(0);
+        let mut best = f64::INFINITY;
+        let mut best_k = usize::MAX;
+        for k in 1..=count {
+            let (u, v) = if k == count { point(0) } else { point(k) };
+            let (eu, ev) = (u - pu0, v - pv0);
+            let cde = du * ev - dv * eu;
+            if cde.abs() > 1e-300 {
+                let s = -(du * pv0 - dv * pu0) / cde;
+                if (0.0..=1.0).contains(&s) {
+                    let t = (pu0 + s * eu) * du + (pv0 + s * ev) * dv;
+                    if t > 0.0 && t < best {
+                        best = t;
+                        best_k = k - 1;
+                    }
+                }
+            }
+            pu0 = u;
+            pv0 = v;
+        }
+        let pivot = if best_k == usize::MAX { Pivot::None } else { self.pivots[best_k] };
         if !best.is_finite() {
             return (f64::MAX, pivot);
         }

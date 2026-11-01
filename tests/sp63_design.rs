@@ -95,7 +95,7 @@ fn sls_strip(ct: CalcType) -> (femgeo::sp63::diagram::Diagram, femgeo::sp63::dia
 
 fn sls(n: f64, m: f64, as_c: f64, lim: f64) -> DesignResult {
     let (c, r) = sls_strip(CalcType::Sls);
-    let p = SlsStrip { h: H, z_top: Z, z_bot: -Z, concrete: &c, rebar: &r, ds_top: DS, ds_bot: DS, crack: crack(SigmaSCrcMethod::ReleasedConcrete8137) };
+    let p = SlsStrip { h: H, z_top: Z, z_bot: -Z, concrete: std::sync::Arc::new(c), rebar: std::sync::Arc::new(r), ds_top: DS, ds_bot: DS, crack: crack(SigmaSCrcMethod::ReleasedConcrete8137) };
     strip_design::required_sls(n, m, &p, as_c, lim)
 }
 

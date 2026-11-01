@@ -3,6 +3,8 @@
 //!
 //! Источник: OpenCS `CScore/ShellSimpl/StripNdmDesign.cs`, коммит `387e157`.
 
+use std::sync::Arc;
+
 use super::diagram::Diagram;
 use super::materials::StripLimits;
 use super::strip::{self, CrackParams, StripRow, StripSection, StripSls, UlsTable};
@@ -180,13 +182,13 @@ pub fn required_tension_uls(n: f64, m: f64, table: &UlsTable, as_other: f64) -> 
 
 /// Полоса и параметры подбора по ПС2.
 #[derive(Clone, Debug)]
-pub struct SlsStrip<'a> {
+pub struct SlsStrip {
     pub h: f64,
     pub z_top: f64,
     pub z_bot: f64,
     /// Диаграмма бетона вида расчёта для ПС2 (п. 6.1.26).
-    pub concrete: &'a Diagram,
-    pub rebar: &'a Diagram,
+    pub concrete: Arc<Diagram>,
+    pub rebar: Arc<Diagram>,
     pub ds_top: f64,
     pub ds_bot: f64,
     pub crack: CrackParams,
@@ -198,7 +200,7 @@ pub fn required_sls(n: f64, m: f64, p: &SlsStrip, as_compression: f64, acrc_lim_
     let tension_top = m >= 0.0;
     let (zt, zc) = if tension_top { (p.z_top, p.z_bot) } else { (p.z_bot, p.z_top) };
     let ds = if tension_top { [p.ds_top, p.ds_bot] } else { [p.ds_bot, p.ds_top] };
-    let sec = StripSection::new(
+    let sec = StripSection::shared(
         p.h,
         vec![StripRow { z: zt, as_: 0.0 }, StripRow { z: zc, as_: 0.0 }],
         p.concrete.clone(),

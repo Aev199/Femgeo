@@ -1,0 +1,15 @@
+# Закреплённая версия OpenCS, из которой перенесён код. Обновление — только отдельным
+# пакетом: scripts/upstream_diff.sh <новый SHA>, перенос диффа, сверка тестов и отпечатка.
+repository = https://github.com/rumata-ap/OpenCS
+commit = 387e15766278d30a01c4f501becd8e8273dd6ac8
+
+# наш файл = файлы OpenCS (через запятую)
+src/sp63/diagram.rs = CScore/Diagramm.cs, CSmath/Lspline.cs
+src/sp63/materials.rs = CScore/MaterialChars.cs, CScore/ShellSimpl/StripNdmLimits.cs
+src/sp63/strip.rs = CScore/ShellSimpl/StripNdmSection.cs, CScore/ShellSimpl/StripNdm.cs, CScore/ShellSimpl/StripNdmUlsTable.cs
+src/sp63/strip_design.rs = CScore/ShellSimpl/StripNdmDesign.cs
+src/sp63/mesh_lp.rs = CScore/ShellSimpl/OrthogonalMeshLp.cs
+src/sp63/capra_maury.rs = CScore/ShellSimpl/CapraMauryDesignSolver.cs, CScore/ShellSimpl/StripNdmAdapter.cs, CScore/ShellSimplSolver.cs
+tests/common/mod.rs = CScore.Tests/ShellSimpl/StripNdmFixture.cs
+tests/sp63_strip.rs = CScore.Tests/ShellSimpl/StripNdmSectionTests.cs, CScore.Tests/ShellSimpl/StripNdmSolveTests.cs, CScore.Tests/ShellSimpl/StripNdmUlsTests.cs, CScore.Tests/ShellSimpl/StripNdmUlsTableTests.cs
+tests/sp63_design.rs = CScore.Tests/ShellSimpl/StripNdmDesignTests.cs, CScore.Tests/ShellSimpl/StripNdmSlsTests.cs, CScore.Tests/ShellSimpl/OrthogonalMeshLpTests.cs, CScore.Tests/ShellSimpl/CapraMauryDesignTests.cs, CScore.Tests/ShellSimpl/CapraMauryDesignSlsTests.cs

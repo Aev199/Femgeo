@@ -6,6 +6,8 @@
 //! Источник: OpenCS `CScore/ShellSimpl/CapraMauryDesignSolver.cs` и `StripNdmAdapter.cs`,
 //! коммит `387e157`.
 
+use std::sync::Arc;
+
 use super::diagram::Diagram;
 use super::materials::{ConcreteChars, ConcreteDiagramType, RebarChars, StripLimits};
 use super::mesh_lp;
@@ -135,8 +137,8 @@ pub struct SlsContext {
     /// Диаметр стержней обоих рядов в расчёте a_crc, м.
     pub ds: f64,
     pub acrc_lim_mm: f64,
-    concrete: Diagram,
-    rebar: Diagram,
+    concrete: Arc<Diagram>,
+    rebar: Arc<Diagram>,
     crack: CrackParams,
     uls_table: Option<UlsTable>,
 }
@@ -177,8 +179,8 @@ impl SlsContext {
             z_bot,
             ds: section.ds_x.max(section.ds_y),
             acrc_lim_mm: opts.acrc_lim_mm,
-            concrete: concrete_sls.diagram(section.concrete_diagram),
-            rebar: rebar_sls.diagram(),
+            concrete: Arc::new(concrete_sls.diagram(section.concrete_diagram)),
+            rebar: Arc::new(rebar_sls.diagram()),
             crack: CrackParams { es: rebar_sls.es, phi1: opts.phi1, phi2: opts.phi2, method: opts.method },
             uls_table,
         }
@@ -188,13 +190,13 @@ impl SlsContext {
         self.uls_table.is_some()
     }
 
-    fn strip(&self, ds: f64) -> SlsStrip<'_> {
+    fn strip(&self, ds: f64) -> SlsStrip {
         SlsStrip {
             h: self.h,
             z_top: self.z_top,
             z_bot: self.z_bot,
-            concrete: &self.concrete,
-            rebar: &self.rebar,
+            concrete: self.concrete.clone(),
+            rebar: self.rebar.clone(),
             ds_top: ds,
             ds_bot: ds,
             crack: self.crack,
@@ -421,4 +423,34 @@ pub fn check_sls(ctx: &SlsContext, f: &PlateForces, p: &ProvidedMeshes, step_deg
             }
         })
         .collect()
+}
+
+/// Параллельное отображение по строкам усилий: порядок результатов совпадает с порядком входа,
+/// результат каждой строки не зависит от числа потоков.
+pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len().max(1));
+    if threads <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let chunk = items.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|part| {
+                let f = &f;
+                scope.spawn(move || part.iter().map(f).collect::<Vec<R>>())
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().expect("поток подбора завершился с ошибкой")).collect()
+    })
+}
+
+/// Подбор по ПС1 для массива строк усилий на всех ядрах.
+pub fn design_uls_batch(ctx: &UlsContext, forces: &[PlateForces], step_deg: f64) -> Vec<Design> {
+    par_map(forces, |f| design_uls(ctx, f, step_deg))
+}
+
+/// Подбор по ПС2 для массива строк усилий на всех ядрах.
+pub fn design_sls_batch(ctx: &SlsContext, forces: &[PlateForces], step_deg: f64) -> Vec<Design> {
+    par_map(forces, |f| design_sls(ctx, f, step_deg))
 }
