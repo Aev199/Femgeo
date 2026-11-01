@@ -44,12 +44,21 @@ pub struct Spring {
     pub k: [f64; 6],
 }
 
+/// Связанная группа вертикальных пружин: полная матрица жёсткости n×n по uz узлов
+/// (свайное поле с взаимовлиянием свай), построчно.
+#[derive(Clone, Debug)]
+pub struct SpringGroup {
+    pub nodes: Vec<usize>,
+    pub k: Vec<f64>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Model {
     pub nodes: Vec<V3>,
     pub shells: Vec<Shell>,
     pub beams: Vec<Beam>,
     pub springs: Vec<Spring>,
+    pub spring_groups: Vec<SpringGroup>,
     /// Закреплённые степени свободы.
     pub fixed: Vec<(usize, [bool; 6])>,
 }
@@ -228,6 +237,21 @@ impl Model {
                 if let Some(i) = eq[6 * s.node + k] {
                     if s.k[k] != 0.0 {
                         trip.push(Triplet::new(i, i, s.k[k]));
+                    }
+                }
+            }
+        }
+        for g in &self.spring_groups {
+            let n = g.nodes.len();
+            if g.k.len() != n * n {
+                return Err("группа пружин: размер матрицы не совпадает с числом узлов".into());
+            }
+            for (a, &na) in g.nodes.iter().enumerate() {
+                let Some(ia) = eq[6 * na + 2] else { continue };
+                for (b, &nb) in g.nodes.iter().enumerate() {
+                    let Some(ib) = eq[6 * nb + 2] else { continue };
+                    if ia >= ib && g.k[a * n + b] != 0.0 {
+                        trip.push(Triplet::new(ia, ib, g.k[a * n + b]));
                     }
                 }
             }
