@@ -35,7 +35,8 @@ fn raft_with_columns_and_slab() {
     }
     // Загружение: 1 кН вниз в каждом узле перекрытия и 2 кН в узле плиты.
     m.cases.push((121..242).map(|n| (n, [0.0, 0.0, -1.0, 0.0, 0.0, 0.0])).chain([(0, [0.0, 0.0, -2.0, 0.0, 0.0, 0.0])]).collect());
-    m.piles.push((24, [0.0, 0.0, 5e4, 0.0, 0.0, 0.0]));
+    m.piles.push(([2.0, 2.0, 0.0], [0.0, 0.0, 5e4, 0.0, 0.0, 0.0]));
+    m.piles.push(([20.0, 2.0, 0.0], [0.0, 0.0, 5e4, 0.0, 0.0, 0.0]));
     let s = split(&m).unwrap();
     assert_eq!(s.raft.shells.len(), 96);
     assert_eq!(s.region.holes.len(), 1);
@@ -43,7 +44,8 @@ fn raft_with_columns_and_slab() {
     assert!((area(&s.region.outer) - 100.0).abs() < 1e-9 && (area(&s.region.holes[0]) - 4.0).abs() < 1e-9);
     assert_eq!((s.z_mid, s.h), (0.0, 1.0));
     assert_eq!(s.piles.len(), 1);
-    assert_eq!(s.raft_nodes[s.piles[0].0], 24);
+    assert_eq!(s.piles[0].0, [2.0, 2.0]);
+    assert_eq!(s.notes, vec!["сваи КЭ 56 вне плиты: 1 из 2".to_string()]);
     let b = s.building.unwrap();
     assert_eq!(b.block.dofs.len(), 4 * 3);
     // Перекрытие на колоннах: вся нагрузка (121 кН) приходит в 4 узла сопряжения.
@@ -66,7 +68,9 @@ fn run_on_building_mesh() {
     let raft_nodes: Vec<usize> = { let mut v: Vec<usize> = m.raft.iter().flat_map(|&s| m.shells[s].nodes.clone()).collect(); v.sort(); v.dedup(); v };
     m.cases.push((121..242).map(|n| (n, [0.0, 0.0, -30.0, 0.0, 0.0, 0.0])).chain(raft_nodes.iter().map(|&n| (n, [0.0, 0.0, -20.0, 0.0, 0.0, 0.0]))).collect());
     m.cases.push((121..242).map(|n| (n, [0.0, 0.0, -10.0, 0.0, 0.0, 0.0])).collect());
-    m.piles.extend([(24, [0.0, 0.0, 1e5, 0.0, 0.0, 0.0]), (30, [0.0, 0.0, 1e5, 0.0, 0.0, 0.0]), (90, [0.0, 0.0, 1e5, 0.0, 0.0, 0.0]), (96, [0.0, 0.0, 1e5, 0.0, 0.0, 0.0])]);
+    for (x, y) in [(2.0, 2.0), (8.0, 2.0), (2.0, 8.0), (8.0, 8.0)] {
+        m.piles.push(([x, y, 0.0], [0.0, 0.0, 1e5, 0.0, 0.0, 0.0]));
+    }
     let mut input = default_input();
     assert_eq!(input.cases.len(), 2);
     input.pile.fd = 1500.0;

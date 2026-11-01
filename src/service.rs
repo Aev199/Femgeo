@@ -368,7 +368,7 @@ impl Service {
                 input.raft.holes = s.region.holes.clone();
                 input.raft.h = s.h;
                 input.raft.z_bottom = s.z_mid - s.h / 2.0;
-                input.existing.extend(s.piles.iter().map(|&(n, _)| [s.raft.nodes[n][0], s.raft.nodes[n][1]]));
+                input.existing.extend(s.piles.iter().map(|p| p.0));
                 Some(s)
             }
             None => None,
@@ -376,14 +376,12 @@ impl Service {
         let r = &input.raft;
         let cc = concrete(&r.concrete)?;
         let (c_uls, r_uls) = (cc.chars(CalcType::Uls), rebar(&r.rebar)?.chars(CalcType::Uls));
-        let raft = match &split {
-            Some(s) => {
-                let mut m = s.raft.clone();
-                plane_fix(&mut m);
-                m
-            }
-            None => raft_model(r, c_uls.eb)?,
-        };
+        // Плита — всегда регулярная сетка Femgeo (сваи рядами в её узлах). Для сетки здания узлы
+        // её плиты (сопряжение, нагрузки) переносятся в ближайшие узлы регулярной сетки.
+        let raft = raft_model(r, c_uls.eb)?;
+        let to_grid: Vec<usize> = split.as_ref().map_or(vec![], |s| {
+            s.raft.nodes.iter().map(|p| (0..raft.nodes.len()).min_by(|&a, &b| dist2(raft.nodes[a], *p).total_cmp(&dist2(raft.nodes[b], *p))).unwrap()).collect()
+        });
         progress("сетка плиты");
 
         // Загружения: давление на все элементы, сосредоточенные силы — в ближайший узел.
@@ -408,7 +406,7 @@ impl Service {
             let to_norm = if c.design { 1.0 / c.gamma_f } else { 1.0 };
             norms.push(to_norm);
             if let Some(s) = &split {
-                let nodal = s.raft_cases[ci].nodal.iter().map(|&(n, f)| (n, f.map(|x| x * to_norm))).collect();
+                let nodal = s.raft_cases[ci].nodal.iter().map(|&(n, f)| (to_grid[n], f.map(|x| x * to_norm))).collect();
                 cases.push(LoadCase { nodal, pressure: vec![] });
                 continue;
             }
@@ -421,8 +419,8 @@ impl Service {
         }
         let combos = crate::loads::combinations(&kinds);
         let building = split.as_ref().and_then(|s| s.building.as_ref()).map(|b| crate::fem::condense::Building {
-            block: b.block.clone(),
-            loads: b.loads.iter().zip(&norms).map(|(l, &k)| l.iter().map(|&(n, f)| (n, f.map(|x| x * k))).collect()).collect(),
+            block: crate::fem::DenseBlock { dofs: b.block.dofs.iter().map(|&d| 6 * to_grid[d / 6] + d % 6).collect(), k: b.block.k.clone() },
+            loads: b.loads.iter().zip(&norms).map(|(l, &k)| l.iter().map(|&(n, f)| (to_grid[n], f.map(|x| x * k))).collect()).collect(),
         });
         let area: f64 = polygon_area(&r.outline) - r.holes.iter().map(|h| polygon_area(h)).sum::<f64>();
         // Нормативная вертикальная нагрузка загружений (вниз — положительная).

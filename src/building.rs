@@ -22,8 +22,8 @@ pub struct Mesh {
     pub raft: Vec<usize>,
     /// Узловые нагрузки по загружениям: (узел, силы и моменты по 6 степеням свободы).
     pub cases: Vec<Vec<(usize, [f64; 6])>>,
-    /// Одноузловые упругие связи (сваи): узел и жёсткости по 6 степеням свободы.
-    pub piles: Vec<(usize, [f64; 6])>,
+    /// Одноузловые упругие связи (сваи, КЭ 56): точка и жёсткости по 6 степеням свободы.
+    pub piles: Vec<([f64; 3], [f64; 6])>,
 }
 
 pub struct Split {
@@ -39,8 +39,8 @@ pub struct Split {
     /// Отметка срединной поверхности и толщина плиты (наибольшая из пластин).
     pub z_mid: f64,
     pub h: f64,
-    /// Существующие сваи: (узел плиты, жёсткости).
-    pub piles: Vec<(usize, [f64; 6])>,
+    /// Существующие сваи под плитой (в контуре, по высоте — в пределах плиты ± 1 м): (X, Y), жёсткости.
+    pub piles: Vec<([f64; 2], [f64; 6])>,
     /// Что исключено или приближено.
     pub notes: Vec<String>,
 }
@@ -222,10 +222,10 @@ pub fn split(m: &Mesh) -> Result<Split, String> {
     }
     let building = if bm.nodes.is_empty() { None } else { Some(condense::building(&bm, &interface, &b_cases)?) };
 
-    let piles = m
-        .piles
-        .iter()
-        .map(|&(n, k)| raft_index.get(&n).map(|&r| (r, k)).ok_or(format!("свая в узле {n} не на плите")))
-        .collect::<Result<_, _>>()?;
+    let piles: Vec<([f64; 2], [f64; 6])> =
+        m.piles.iter().filter(|(p, _)| (p[2] - z_mid).abs() <= h / 2.0 + 1.0 && region.contains([p[0], p[1]])).map(|&(p, k)| ([p[0], p[1]], k)).collect();
+    if piles.len() < m.piles.len() {
+        notes.push(format!("сваи КЭ 56 вне плиты: {} из {}", m.piles.len() - piles.len(), m.piles.len()));
+    }
     Ok(Split { raft, raft_nodes, raft_cases, building, region, z_mid, h, piles, notes })
 }
