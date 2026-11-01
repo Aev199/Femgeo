@@ -7,5 +7,6 @@ pub mod geobase;
 pub mod loads;
 pub mod optimize;
 pub mod piles;
+pub mod reinforce;
 pub mod service;
 pub mod sp63;

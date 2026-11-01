@@ -247,7 +247,7 @@ function select(i) {
   variantTable();
   pileTable();
   render();
-  $('export-csv').disabled = $('export-dxf').disabled = i < 0;
+  $('export-csv').disabled = $('export-dxf').disabled = $('export-rebar').disabled = i < 0;
   const v = state.result.variants[i];
   $('subtitle').textContent = `${v.reference ? 'существующая: ' : ''}${v.count} свай, ${fmt(v.kg_m3, 1)} кг/м³`;
 }
@@ -319,7 +319,7 @@ $('open-geobase').onclick = async () => {
   } catch (e) { status(`GeoBase: ${e.message ?? e}`, true); }
 };
 
-for (const [id, kind, cmd] of [['export-csv', 'csv', 'export_csv'], ['export-dxf', 'dxf', 'export_dxf']]) {
+for (const [id, kind, cmd] of [['export-csv', 'csv', 'export_csv'], ['export-dxf', 'dxf', 'export_dxf'], ['export-rebar', 'dxf', 'export_rebar_dxf']]) {
   $(id).onclick = async () => {
     const path = await pickFile(kind, true);
     if (!path) return;

@@ -268,6 +268,7 @@ impl Service {
             "run" => self.run(args, progress),
             "export_csv" => self.export(&args, false),
             "export_dxf" => self.export(&args, true),
+            "export_rebar_dxf" => self.export_rebar(&args),
             _ => Err(format!("неизвестная команда «{command}»")),
         }
     }
@@ -446,6 +447,21 @@ impl Service {
         let (input, raft, vs) = self.last.as_ref().ok_or("нет результата расчёта")?;
         let v = vs.get(i).ok_or("нет такого варианта")?;
         let text = if dxf { dxf_text(input, raft, v) } else { csv_text(raft, v) };
+        std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
+        Ok(json!({ "path": path }))
+    }
+}
+
+impl Service {
+    /// Поля требуемой арматуры плиты выбранного варианта: DXF, слои верх/низ × X/Y, см²/м.
+    fn export_rebar(&self, args: &Value) -> Result<Value, String> {
+        let path = args.get("path").and_then(Value::as_str).ok_or("нет пути к файлу")?;
+        let i = args.get("variant").and_then(Value::as_u64).ok_or("не выбран вариант")? as usize;
+        let (_, raft, vs) = self.last.as_ref().ok_or("нет результата расчёта")?;
+        let v = vs.get(i).ok_or("нет такого варианта")?;
+        let f = |k: usize| -> Vec<f64> { v.rebar.iter().map(|a| a[k] * 1e4).collect() };
+        let (tx, ty, bx, by) = (f(0), f(1), f(2), f(3));
+        let text = crate::reinforce::dxf_fields(raft, &[("AS_TOP_X", &tx), ("AS_TOP_Y", &ty), ("AS_BOT_X", &bx), ("AS_BOT_Y", &by)], "см²/м");
         std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
         Ok(json!({ "path": path }))
     }

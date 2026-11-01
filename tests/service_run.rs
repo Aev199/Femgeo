@@ -23,6 +23,10 @@ fn default_example_runs_and_exports() {
     let c = std::fs::read_to_string(&csv).unwrap();
     assert_eq!(c.lines().count(), 1 + vs[0]["count"].as_u64().unwrap() as usize);
     assert!(std::fs::read_to_string(&dxf).unwrap().contains("CIRCLE"));
+    let rb = dir.join("femgeo_rebar.dxf");
+    s.dispatch("export_rebar_dxf", json!({ "path": rb, "variant": 0 }), &mut |_| {}).unwrap();
+    let t = std::fs::read_to_string(&rb).unwrap();
+    assert!(t.contains("AS_BOT_X") && t.contains("3DFACE"));
     assert!(s.dispatch("nonsense", Value::Null, &mut |_| {}).is_err());
 }
 
