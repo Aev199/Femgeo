@@ -237,6 +237,13 @@ fn raft_model(r: &RaftInput, e: f64) -> Result<Model, String> {
     if m.shells.is_empty() {
         return Err("в контур плиты не попал ни один элемент: уменьшите размер элемента".into());
     }
+    plane_fix(&mut m);
+    Ok(m)
+}
+
+/// Плита в своей плоскости: поворот вокруг вертикали во всех узлах, сдвиг и поворот в плане
+/// — в двух удалённых узлах (сваи держат только вертикально).
+fn plane_fix(m: &mut Model) {
     for k in 0..m.nodes.len() {
         m.fixed.push((k, [false, false, false, false, false, true]));
     }
@@ -246,7 +253,6 @@ fn raft_model(r: &RaftInput, e: f64) -> Result<Model, String> {
     m.fixed.push((a, [true, true, false, false, false, false]));
     let ab = [m.nodes[b][0] - m.nodes[a][0], m.nodes[b][1] - m.nodes[a][1]];
     m.fixed.push((b, if ab[0].abs() >= ab[1].abs() { [false, true, false, false, false, false] } else { [true, false, false, false, false, false] }));
-    Ok(m)
 }
 
 fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -340,10 +346,44 @@ impl Service {
 
     fn run(&mut self, args: Value, progress: &mut dyn FnMut(&str)) -> Result<Value, String> {
         let input: Input = serde_json::from_value(args).map_err(|e| format!("исходные данные: {e}"))?;
+        self.run_with(input, None, progress)
+    }
+
+    /// Расчёт по сетке здания (препроцессор topo): плита, её контур, толщина и отметка, нагрузки
+    /// и существующие сваи — из `mesh`; из `input` — материалы, сваи, грунт, ограничения и вид
+    /// загружений (`input.cases` по порядку `mesh.cases`; q и сосредоточенные силы не
+    /// используются, признак «расчётные» относится к нагрузкам сетки).
+    pub fn run_mesh(&mut self, input: Input, mesh: &crate::building::Mesh, progress: &mut dyn FnMut(&str)) -> Result<Value, String> {
+        self.run_with(input, Some(mesh), progress)
+    }
+
+    fn run_with(&mut self, mut input: Input, mesh: Option<&crate::building::Mesh>, progress: &mut dyn FnMut(&str)) -> Result<Value, String> {
+        let split = match mesh {
+            Some(m) => {
+                if m.cases.len() != input.cases.len() {
+                    return Err(format!("загружений в сетке {}, в исходных данных {}", m.cases.len(), input.cases.len()));
+                }
+                let s = crate::building::split(m)?;
+                input.raft.outline = s.region.outer.clone();
+                input.raft.holes = s.region.holes.clone();
+                input.raft.h = s.h;
+                input.raft.z_bottom = s.z_mid - s.h / 2.0;
+                input.existing.extend(s.piles.iter().map(|&(n, _)| [s.raft.nodes[n][0], s.raft.nodes[n][1]]));
+                Some(s)
+            }
+            None => None,
+        };
         let r = &input.raft;
         let cc = concrete(&r.concrete)?;
         let (c_uls, r_uls) = (cc.chars(CalcType::Uls), rebar(&r.rebar)?.chars(CalcType::Uls));
-        let raft = raft_model(r, c_uls.eb)?;
+        let raft = match &split {
+            Some(s) => {
+                let mut m = s.raft.clone();
+                plane_fix(&mut m);
+                m
+            }
+            None => raft_model(r, c_uls.eb)?,
+        };
         progress("сетка плиты");
 
         // Загружения: давление на все элементы, сосредоточенные силы — в ближайший узел.
@@ -352,7 +392,8 @@ impl Service {
         }
         let mut cases = Vec::new();
         let mut kinds = Vec::new();
-        for c in &input.cases {
+        let mut norms = Vec::new();
+        for (ci, c) in input.cases.iter().enumerate() {
             let kind = match c.kind.as_str() {
                 "permanent" => crate::loads::Kind::Permanent,
                 "long" => crate::loads::Kind::Long,
@@ -365,6 +406,12 @@ impl Service {
             kinds.push(crate::loads::Case { kind, gamma_f: c.gamma_f, psi_long: c.psi_long.clamp(0.0, 1.0) });
             // Загружения хранятся нормативными; расчётные значения приводятся делением на γf.
             let to_norm = if c.design { 1.0 / c.gamma_f } else { 1.0 };
+            norms.push(to_norm);
+            if let Some(s) = &split {
+                let nodal = s.raft_cases[ci].nodal.iter().map(|&(n, f)| (n, f.map(|x| x * to_norm))).collect();
+                cases.push(LoadCase { nodal, pressure: vec![] });
+                continue;
+            }
             let mut lc = LoadCase { pressure: (0..raft.shells.len()).map(|s| (s, -c.q * to_norm)).collect(), ..Default::default() };
             for p in &c.points {
                 let k = (0..raft.nodes.len()).min_by(|&a, &b| dist2(raft.nodes[a], [p.x, p.y, 0.0]).total_cmp(&dist2(raft.nodes[b], [p.x, p.y, 0.0]))).unwrap();
@@ -373,6 +420,18 @@ impl Service {
             cases.push(lc);
         }
         let combos = crate::loads::combinations(&kinds);
+        let building = split.as_ref().and_then(|s| s.building.as_ref()).map(|b| crate::fem::condense::Building {
+            block: b.block.clone(),
+            loads: b.loads.iter().zip(&norms).map(|(l, &k)| l.iter().map(|&(n, f)| (n, f.map(|x| x * k))).collect()).collect(),
+        });
+        let area: f64 = polygon_area(&r.outline) - r.holes.iter().map(|h| polygon_area(h)).sum::<f64>();
+        // Нормативная вертикальная нагрузка загружений (вниз — положительная).
+        let case_total: Vec<f64> = match &building {
+            None if split.is_none() => input.cases.iter().map(|k| (k.q * area + k.points.iter().map(|p| p.n).sum::<f64>()) / if k.design { k.gamma_f } else { 1.0 }).collect(),
+            _ => (0..cases.len())
+                .map(|i| -cases[i].nodal.iter().chain(building.as_ref().map_or(&[][..], |b| &b.loads[i][..])).map(|l| l.1[2]).sum::<f64>())
+                .collect(),
+        };
 
         let pi = &input.pile;
         let kind = match pi.kind.as_str() {
@@ -436,7 +495,7 @@ impl Service {
             design: &design,
             rebar_axis: [1.0, 0.0, 0.0],
             raft_h: r.h,
-            building: None,
+            building: building.as_ref(),
             crack_short: crack_short.as_ref(),
             crack_long: crack_long.as_ref(),
             punching: input.punching.then(|| Punching { rbt: c_uls.rbt, h0: r.h - r.cover, raft: Region { outer: r.outline.clone(), holes: r.holes.clone() } }),
@@ -444,12 +503,11 @@ impl Service {
             cache: Default::default(),
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
-        let area: f64 = polygon_area(&r.outline) - r.holes.iter().map(|h| polygon_area(h)).sum::<f64>();
         // Наибольшая суммарная расчётная нагрузка по сочетаниям ПС1.
         let total = combos
             .uls
             .iter()
-            .map(|c| c.iter().zip(&input.cases).map(|(f, k)| f * (k.q * area + k.points.iter().map(|p| p.n).sum::<f64>()) / if k.design { k.gamma_f } else { 1.0 }).sum::<f64>())
+            .map(|c| c.iter().zip(&case_total).map(|(f, t)| f * t).sum::<f64>())
             .fold(0.0, f64::max);
         let n_start = ((1.5 * total / pi.fd).ceil() as usize).max(4);
         progress("подбор расстановки");

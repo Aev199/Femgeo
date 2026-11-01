@@ -51,3 +51,32 @@ fn raft_with_columns_and_slab() {
     assert!((fz + 121.0).abs() < 1e-6, "{fz}");
     assert_eq!(s.raft_cases[0].nodal.iter().map(|l| l.1[2]).sum::<f64>(), -2.0);
 }
+
+/// Плита 10 × 10 м (отверстие 2 × 2), 4 колонны, перекрытие: подбор по сетке здания.
+#[test]
+fn run_on_building_mesh() {
+    use femgeo::service::{default_input, Service};
+    let mut m = Mesh::default();
+    m.raft = grid(&mut m, 0.0, 0.8, true);
+    grid(&mut m, 3.0, 0.2, false);
+    for (x, y) in [(2, 2), (8, 2), (2, 8), (8, 8)] {
+        m.beams.push(Beam { n1: y * 11 + x, n2: 121 + y * 11 + x, e: 3e7, g: 1.25e7, a: 0.16, iy: 2.1e-3, iz: 2.1e-3, j: 3.6e-3, ref_dir: None });
+    }
+    // Постоянное: 30 кН в узлах перекрытия и 20 кН в узлах плиты; кратковременное — 10 кН в узлах перекрытия.
+    let raft_nodes: Vec<usize> = { let mut v: Vec<usize> = m.raft.iter().flat_map(|&s| m.shells[s].nodes.clone()).collect(); v.sort(); v.dedup(); v };
+    m.cases.push((121..242).map(|n| (n, [0.0, 0.0, -30.0, 0.0, 0.0, 0.0])).chain(raft_nodes.iter().map(|&n| (n, [0.0, 0.0, -20.0, 0.0, 0.0, 0.0]))).collect());
+    m.cases.push((121..242).map(|n| (n, [0.0, 0.0, -10.0, 0.0, 0.0, 0.0])).collect());
+    m.piles.extend([(24, [0.0, 0.0, 1e5, 0.0, 0.0, 0.0]), (30, [0.0, 0.0, 1e5, 0.0, 0.0, 0.0]), (90, [0.0, 0.0, 1e5, 0.0, 0.0, 0.0]), (96, [0.0, 0.0, 1e5, 0.0, 0.0, 0.0])]);
+    let mut input = default_input();
+    assert_eq!(input.cases.len(), 2);
+    input.pile.fd = 1500.0;
+    let out = Service::new().run_mesh(input, &m, &mut |_| {}).unwrap();
+    let vs = out["variants"].as_array().unwrap();
+    assert!(vs[0]["reference"].as_bool().unwrap());
+    assert_eq!(vs[0]["count"], 4);
+    assert!(vs.len() > 1);
+    let best = vs.iter().skip(1).find(|v| v["feasible"].as_bool().unwrap()).expect("нет допустимого варианта");
+    // Нормативная нагрузка 121·40 + 117·20 ≈ 7180 кН; по ПС1 при Fd = 1500 кН — не меньше 5 свай.
+    assert!(best["count"].as_u64().unwrap() >= 5, "{}", best["count"]);
+    assert_eq!(out["holes"].as_array().unwrap().len(), 1);
+}
