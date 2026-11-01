@@ -25,6 +25,7 @@ src/piles/      СП 24: осадка и взаимовлияние свай (mo
 src/loads.rs    сочетания СП 20
 src/optimize/   подбор свай: Problem::regular (ряды), Problem::frontier (свободно), Вудбери
 src/reinforce.rs армирование здания, изополя DXF
+src/mxt.rs      здание из MIDAS .mxt (экспорт topo_reconstruct_rs)
 src/geobase.rs  чтение объекта geobase (SQLite)
 src/service.rs  команды окна: defaults, run, open_geobase, save/load_project, экспорты
 app/            окно Tauri 2 (src-tauri) и интерфейс (ui: index.html, src/main.js, plan.js, app.css; style.css — дизайн-код GeoBase из topo)
