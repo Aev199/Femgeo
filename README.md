@@ -13,6 +13,11 @@
 из geobase. Расчёты сечений по СП 63 — перенос из
 [OpenCS / CScore](https://github.com/rumata-ap/OpenCS).
 
-Статус: постановка, кода пока нет. См. `docs/SPEC.md` и `docs/DEV_STATE.md`.
+Статус: этап 1 — подбор армирования плит по Капра–Мори (ПС1, ПС2) готов, см.
+`docs/DEV_STATE.md`. Постановка — `docs/SPEC.md`.
+
+```sh
+cargo test --offline
+```
 
 Лицензия: GPL-3.0 (`LICENSE`).

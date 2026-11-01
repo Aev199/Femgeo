@@ -1,0 +1,12 @@
+[package]
+name = "femgeo"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Подбор расстановки свай и армирования по расчёту на грунтовом основании"
+publish = false
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
