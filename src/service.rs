@@ -341,6 +341,7 @@ impl Service {
             design: &design,
             rebar_axis: [1.0, 0.0, 0.0],
             raft_h: r.h,
+            building: None,
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
         let area: f64 = polygon_area(&r.outline) - r.holes.iter().map(|h| polygon_area(h)).sum::<f64>();

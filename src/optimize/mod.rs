@@ -6,6 +6,7 @@
 //! (свайное поле по СП 24 → плита МКЭ → нагрузки на сваи, осадки → подбор Капра–Мори).
 //! Алгоритм детерминирован и не зависит от нумерации кандидатов.
 
+use crate::fem::condense::Building;
 use crate::fem::{self, LoadCase, Model, SpringGroup, V3};
 use crate::piles::layout::{self, Region, Rules};
 use crate::piles::{Field, Pile, SoilColumn};
@@ -50,6 +51,9 @@ pub struct Problem<'a> {
     pub rebar_axis: V3,
     /// Толщина плиты, м (для кг/м³).
     pub raft_h: f64,
+    /// Надземная часть, сконденсированная на плиту (`fem::condense::building`); приведённые
+    /// нагрузки — по одному набору на сочетание. None — здание не учитывается.
+    pub building: Option<&'a Building>,
 }
 
 /// Оценка варианта.
@@ -115,6 +119,19 @@ impl Problem<'_> {
         let k = field.stiffness()?;
         let mut m = self.raft.clone();
         m.spring_groups.push(SpringGroup { nodes: piles.to_vec(), k: k.clone() });
+        let mut combinations = self.combinations.clone();
+        if let Some(b) = self.building {
+            if b.loads.len() != combinations.len() {
+                return Err("здание: число наборов приведённых нагрузок не равно числу сочетаний".into());
+            }
+            m.blocks.push(b.block.clone());
+            for &d in b.block.dofs.iter().step_by(3) {
+                m.fixed.push((d / 6, [true, true, false, false, false, true]));
+            }
+            for (lc, extra) in combinations.iter_mut().zip(&b.loads) {
+                lc.nodal.extend(extra.iter().copied());
+            }
+        }
         let lin = m.factorize()?;
         let np = piles.len();
         let mut pile_n = vec![0.0f64; np];
@@ -124,7 +141,7 @@ impl Problem<'_> {
         let mut env = vec![[0.0f64; 4]; ne];
         let mut w_nodes = vec![0.0f64; m.nodes.len()];
         let mut impossible = false;
-        for lc in &self.combinations {
+        for lc in &combinations {
             let u = lin.solve(&m, lc)?;
             let w: Vec<f64> = piles.iter().map(|&n| u[6 * n + 2]).collect();
             let s_lc = w.iter().map(|x| -x).fold(0.0, f64::max);

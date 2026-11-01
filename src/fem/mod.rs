@@ -2,6 +2,7 @@
 //!
 //! Глобальные степени свободы узла: ux, uy, uz, θx, θy, θz.
 
+pub mod condense;
 pub mod shell;
 
 use faer::linalg::solvers::Solve;
@@ -52,6 +53,14 @@ pub struct SpringGroup {
     pub k: Vec<f64>,
 }
 
+/// Суперэлемент: полная матрица жёсткости по заданным глобальным степеням свободы, построчно
+/// (например, сконденсированная надземная часть здания).
+#[derive(Clone, Debug)]
+pub struct DenseBlock {
+    pub dofs: Vec<usize>,
+    pub k: Vec<f64>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Model {
     pub nodes: Vec<V3>,
@@ -59,6 +68,7 @@ pub struct Model {
     pub beams: Vec<Beam>,
     pub springs: Vec<Spring>,
     pub spring_groups: Vec<SpringGroup>,
+    pub blocks: Vec<DenseBlock>,
     /// Закреплённые степени свободы.
     pub fixed: Vec<(usize, [bool; 6])>,
 }
@@ -185,7 +195,7 @@ impl Model {
         6 * self.nodes.len()
     }
 
-    fn equations(&self) -> (Vec<Option<usize>>, usize) {
+    pub fn equations(&self) -> (Vec<Option<usize>>, usize) {
         let mut fixed = vec![false; self.ndof()];
         for &(node, f) in &self.fixed {
             for k in 0..6 {
@@ -203,20 +213,15 @@ impl Model {
         (eq, n)
     }
 
-    /// Сборка и разложение. Ошибка — вырожденная схема (механизм) или плохой элемент.
-    pub fn factorize(&self) -> Result<Linear, String> {
-        let (eq, neq) = self.equations();
-        let mut trip: Vec<Triplet<usize, usize, f64>> = Vec::new();
-        let mut add = |dofs: &[usize], k: &dyn Fn(usize, usize) -> f64| {
+    /// Все вклады в глобальную матрицу жёсткости: (степень свободы, степень свободы, значение),
+    /// обе половины симметричной матрицы.
+    pub fn entries(&self, put: &mut dyn FnMut(usize, usize, f64)) -> Result<(), String> {
+        let block = |dofs: &[usize], k: &dyn Fn(usize, usize) -> f64, put: &mut dyn FnMut(usize, usize, f64)| {
             for (a, &da) in dofs.iter().enumerate() {
-                let Some(ia) = eq[da] else { continue };
                 for (b, &db) in dofs.iter().enumerate() {
-                    let Some(ib) = eq[db] else { continue };
-                    if ia >= ib {
-                        let v = k(a, b);
-                        if v != 0.0 {
-                            trip.push(Triplet::new(ia, ib, v));
-                        }
+                    let v = k(a, b);
+                    if v != 0.0 {
+                        put(da, db, v);
                     }
                 }
             }
@@ -226,18 +231,16 @@ impl Model {
             let c: Vec<V3> = s.nodes.iter().map(|&n| self.nodes[n]).collect();
             let k = shell::stiffness(&c, &s.mat).map_err(|e| format!("оболочка {i}: {e}"))?;
             let nd = 6 * s.nodes.len();
-            add(&dofs_of(&s.nodes), &|a, b| k[a * nd + b]);
+            block(&dofs_of(&s.nodes), &|a, b| k[a * nd + b], put);
         }
         for (i, b) in self.beams.iter().enumerate() {
             let k = beam_stiffness(&self.nodes, b).map_err(|e| format!("стержень {i}: {e}"))?;
-            add(&dofs_of(&[b.n1, b.n2]), &|x, y| k[x][y]);
+            block(&dofs_of(&[b.n1, b.n2]), &|x, y| k[x][y], put);
         }
         for s in &self.springs {
             for k in 0..6 {
-                if let Some(i) = eq[6 * s.node + k] {
-                    if s.k[k] != 0.0 {
-                        trip.push(Triplet::new(i, i, s.k[k]));
-                    }
+                if s.k[k] != 0.0 {
+                    put(6 * s.node + k, 6 * s.node + k, s.k[k]);
                 }
             }
         }
@@ -246,16 +249,30 @@ impl Model {
             if g.k.len() != n * n {
                 return Err("группа пружин: размер матрицы не совпадает с числом узлов".into());
             }
-            for (a, &na) in g.nodes.iter().enumerate() {
-                let Some(ia) = eq[6 * na + 2] else { continue };
-                for (b, &nb) in g.nodes.iter().enumerate() {
-                    let Some(ib) = eq[6 * nb + 2] else { continue };
-                    if ia >= ib && g.k[a * n + b] != 0.0 {
-                        trip.push(Triplet::new(ia, ib, g.k[a * n + b]));
-                    }
+            let dofs: Vec<usize> = g.nodes.iter().map(|&n| 6 * n + 2).collect();
+            block(&dofs, &|a, b| g.k[a * n + b], put);
+        }
+        for (i, d) in self.blocks.iter().enumerate() {
+            let n = d.dofs.len();
+            if d.k.len() != n * n {
+                return Err(format!("суперэлемент {i}: размер матрицы не совпадает с числом степеней свободы"));
+            }
+            block(&d.dofs, &|a, b| d.k[a * n + b], put);
+        }
+        Ok(())
+    }
+
+    /// Сборка и разложение. Ошибка — вырожденная схема (механизм) или плохой элемент.
+    pub fn factorize(&self) -> Result<Linear, String> {
+        let (eq, neq) = self.equations();
+        let mut trip: Vec<Triplet<usize, usize, f64>> = Vec::new();
+        self.entries(&mut |a, b, v| {
+            if let (Some(ia), Some(ib)) = (eq[a], eq[b]) {
+                if ia >= ib {
+                    trip.push(Triplet::new(ia, ib, v));
                 }
             }
-        }
+        })?;
         let a = SparseColMat::<usize, f64>::try_new_from_triplets(neq, neq, &trip).map_err(|e| format!("сборка: {e:?}"))?;
         let llt = a.sp_cholesky(Side::Lower).map_err(|_| "матрица не положительно определена: схема изменяема или есть незакреплённые степени свободы".to_string())?;
         Ok(Linear { llt, eq, neq })

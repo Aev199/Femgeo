@@ -46,6 +46,10 @@ fn material_util_per_kn(d: f64, l0: f64) -> f64 {
 }
 
 fn run() -> Vec<femgeo::optimize::Evaluation> {
+    run_with(None, 49).0
+}
+
+fn run_with(building: Option<&femgeo::fem::condense::Building>, n: usize) -> (Vec<femgeo::optimize::Evaluation>, femgeo::optimize::Evaluation) {
     let d = 0.6;
     let (c, r) = (ConcreteClass::B25.chars(CalcType::Uls), RebarClass::A500.chars(CalcType::Uls));
     let sec = PlateSection { h: 0.8, a_top: 0.05, a_bot: 0.05, ds_x: 0.016, ds_y: 0.016, concrete_diagram: ConcreteDiagramType::L3 };
@@ -64,9 +68,14 @@ fn run() -> Vec<femgeo::optimize::Evaluation> {
         design: &design,
         rebar_axis: [1.0, 0.0, 0.0],
         raft_h: 0.8,
+        building,
     };
+    if n == 0 {
+        let grid: Vec<usize> = p.candidates().into_iter().filter(|&c| { let q = p.raft.nodes[c]; (q[0] as i64 - 1) % 2 == 0 && (q[1] as i64 - 1) % 2 == 0 }).collect();
+        return (vec![], p.evaluate(&grid).unwrap());
+    }
     let t = std::time::Instant::now();
-    let f = p.frontier(49, 8, &mut |_| {}).unwrap();
+    let f = p.frontier(n, 8, &mut |_| {}).unwrap();
     println!("фронт за {:?}", t.elapsed());
     for e in &f {
         println!("свай {:2}: кг/м³ {:6.1}, Кисп грунт {:.3}, материал {:.3}, s {:.4} м, Δs/L {:.5}, допустим {}", e.piles.len(), e.kg_m3, e.util_ground, e.util_material, e.s_max, e.ds_rel, e.feasible);
@@ -75,7 +84,8 @@ fn run() -> Vec<femgeo::optimize::Evaluation> {
         let sum: f64 = e.pile_n.iter().sum();
         assert!((sum - Q * A * A).abs() < 1e-3 * Q * A * A, "Σ реакций {sum}");
     }
-    f
+    let e = f[0].clone();
+    (f, e)
 }
 
 #[test]
@@ -91,4 +101,52 @@ fn frontier_on_uniform_raft() {
     // Детерминизм.
     let g = run();
     assert_eq!(f.iter().map(|e| e.piles.clone()).collect::<Vec<_>>(), g.iter().map(|e| e.piles.clone()).collect::<Vec<_>>());
+}
+
+/// Каркас 4×4 колонны (шаг 4 м, высота 3 м) с перекрытием 0,25 м над плитой; нагрузка на
+/// перекрытие 15 кПа. Равновесие с конденсированным зданием и меньшая неравномерность осадок.
+#[test]
+fn building_stiffness_in_evaluation() {
+    use femgeo::fem::{condense, Beam};
+    let mut s = Model::default();
+    let mut iface = vec![];
+    let top0 = 16;
+    for i in 0..4 {
+        for j in 0..4 {
+            s.nodes.push([1.0 + 3.0 * j as f64, 1.0 + 3.0 * i as f64, 0.0]);
+        }
+    }
+    for k in 0..16 {
+        let p = s.nodes[k];
+        iface.push((k, (p[1] as usize) * (N + 1) + p[0] as usize));
+    }
+    for i in 0..4 {
+        for j in 0..4 {
+            s.nodes.push([1.0 + 3.0 * j as f64, 1.0 + 3.0 * i as f64, 3.0]);
+        }
+    }
+    let top = |i: usize, j: usize| top0 + i * 4 + j;
+    let slab = ShellMaterial { e: 3.0e7, nu: 0.2, h: 0.25 };
+    for i in 0..3 {
+        for j in 0..3 {
+            s.shells.push(Shell { nodes: vec![top(i, j), top(i, j + 1), top(i + 1, j + 1), top(i + 1, j)], mat: slab });
+        }
+    }
+    let (a, iz) = (0.25, 0.5f64.powi(4) / 12.0);
+    for k in 0..16 {
+        s.beams.push(Beam { n1: k, n2: top0 + k, e: 3.0e7, g: 1.25e7, a, iy: iz, iz, j: 2.0 * iz, ref_dir: None });
+    }
+    let slab_load = LoadCase { pressure: (0..9).map(|e| (e, -15.0)).collect(), ..Default::default() };
+    let b = condense::building(&s, &iface, &[slab_load]).unwrap();
+    let total_building = 15.0 * 9.0 * 9.0;
+    let fz: f64 = b.loads[0].iter().map(|(_, f)| -f[2]).sum();
+    assert!((fz - total_building).abs() < 1e-6 * total_building, "приведённая вертикальная нагрузка {fz}");
+
+    let (_, with) = run_with(Some(&b), 0);
+    let sum: f64 = with.pile_n.iter().sum();
+    assert!((sum - (Q * A * A + total_building)).abs() < 1e-3 * sum, "Σ реакций {sum}");
+    // Без здания — те же сваи и только нагрузка на плиту (меньше): даже так Δs/L больше.
+    let (_, bare) = run_with(None, 0);
+    println!("Δs/L: со зданием {:.5}, без {:.5} (без веса здания)", with.ds_rel, bare.ds_rel);
+    assert!(with.ds_rel < bare.ds_rel, "здание должно уменьшать неравномерность осадок");
 }
