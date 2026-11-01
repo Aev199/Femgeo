@@ -77,6 +77,7 @@ fn run_with(building: Option<&femgeo::fem::condense::Building>, n: usize) -> (Ve
         crack_long: None,
         punching: None,
         existing: vec![],
+        cache: Default::default(),
     };
     if n == usize::MAX {
         let t = std::time::Instant::now();
@@ -95,6 +96,22 @@ fn run_with(building: Option<&femgeo::fem::condense::Building>, n: usize) -> (Ve
         }
         let e = f[0].clone();
         return (f, e);
+    }
+    if n == 1 {
+        // Прямой расчёт для сравнения: свайное поле в модели, разложение заново.
+        let grid: Vec<usize> = p.candidates().into_iter().filter(|&c| { let q = p.raft.nodes[c]; (q[0] as i64 - 1) % 3 == 0 && (q[1] as i64 - 1) % 3 == 0 }).collect();
+        let e = p.evaluate(&grid).unwrap();
+        let ps: Vec<femgeo::piles::Pile> = grid.iter().map(|&k| femgeo::piles::Pile { x: p.raft.nodes[k][0], y: p.raft.nodes[k][1], head: p.pile_head, length: p.pile.length, d: p.pile.d, ea: p.pile.ea }).collect();
+        let kk = femgeo::piles::Field::new(&ps, &soil).stiffness().unwrap();
+        let mut m = p.raft.clone();
+        m.spring_groups.push(femgeo::fem::SpringGroup { nodes: grid.clone(), k: kk.clone() });
+        let u = m.factorize().unwrap().solve(&m, &p.cases[0]).unwrap();
+        let np = grid.len();
+        for i in 0..np {
+            let r: f64 = -(0..np).map(|j| kk[i * np + j] * u[6 * grid[j] + 2]).sum::<f64>();
+            assert!((r - e.pile_n[i]).abs() < 1e-4 * r.abs().max(1.0), "свая {i}: прямой {r}, Вудбери {}", e.pile_n[i]);
+        }
+        return (vec![], e);
     }
     if n == 0 {
         let grid: Vec<usize> = p.candidates().into_iter().filter(|&c| { let q = p.raft.nodes[c]; (q[0] as i64 - 1) % 2 == 0 && (q[1] as i64 - 1) % 2 == 0 }).collect();
@@ -184,4 +201,9 @@ fn regular_rows_frontier() {
     for w in f.windows(2) {
         assert!(w[1].piles.len() < w[0].piles.len() && w[1].kg_m3 > w[0].kg_m3, "фронт не монотонен");
     }
+}
+
+#[test]
+fn woodbury_matches_direct_solution() {
+    run_with(None, 1);
 }

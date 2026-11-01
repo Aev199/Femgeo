@@ -7,7 +7,10 @@
 //! Алгоритм детерминирован и не зависит от нумерации кандидатов.
 
 use crate::fem::condense::Building;
-use crate::fem::{self, LoadCase, Model, SpringGroup, V3};
+use std::cell::OnceCell;
+use std::collections::HashMap;
+
+use crate::fem::{self, LoadCase, Model, Spring, V3};
 use crate::piles::layout::{self, Region, Rules};
 use crate::piles::{Field, Pile, SoilColumn};
 use crate::sp63::capra_maury::{self, PlateForces, SlsContext, UlsContext};
@@ -69,6 +72,23 @@ pub struct Problem<'a> {
     /// Существующие сваи (ориентир, не правило): старт свободного режима и предпочтение
     /// позиций рядом с ними.
     pub existing: Vec<[f64; 2]>,
+    /// Подготовка расчёта (заполняется при первой оценке): `Default::default()`.
+    pub cache: OnceCell<Prepared>,
+}
+
+/// Один раз для постановки: разложение модели без свай K0 (плита, здание, регуляризующие
+/// пружины 1e-6 от жёсткости сваи), перемещения по загружениям u0 и столбцы G = K0⁻¹·e_uz
+/// для всех кандидатных узлов — на степенях свободы узлов плиты. Сваи учитываются по
+/// Вудбери: (F + G_SS)·t = w0, u = u0 − G·t, F — податливость свайного поля (СП 24).
+pub struct Prepared {
+    index: HashMap<usize, usize>,
+    /// Узел плиты → номер в `nodes`.
+    pos: HashMap<usize, usize>,
+    nodes: Vec<usize>,
+    /// По загружениям: перемещения узлов плиты (6 на узел).
+    u0: Vec<Vec<f64>>,
+    /// По кандидатам: перемещения узлов плиты от единичной силы +z в кандидате.
+    g: Vec<Vec<f64>>,
 }
 
 /// Данные проверки продавливания.
@@ -155,26 +175,43 @@ impl Problem<'_> {
             })
             .collect();
         let field = Field::new(&ps, self.soil);
-        let k = field.stiffness()?;
-        let mut m = self.raft.clone();
-        m.spring_groups.push(SpringGroup { nodes: piles.to_vec(), k: k.clone() });
-        let mut cases = self.cases.clone();
-        if let Some(b) = self.building {
-            if b.loads.len() != cases.len() {
-                return Err("здание: число наборов приведённых нагрузок не равно числу загружений".into());
-            }
-            m.blocks.push(b.block.clone());
-            for &d in b.block.dofs.iter().step_by(3) {
-                m.fixed.push((d / 6, [true, true, false, false, false, true]));
-            }
-            for (lc, extra) in cases.iter_mut().zip(&b.loads) {
-                lc.nodal.extend(extra.iter().copied());
+        let p = self.prepared()?;
+        let m = &self.raft;
+        let np = piles.len();
+        let idx: Vec<usize> = piles.iter().map(|n| p.index.get(n).copied().ok_or("свая не в допустимой позиции")).collect::<Result<_, _>>()?;
+        let at = |v: &[f64], node: usize| v[6 * p.pos[&node] + 2];
+        // A = F + G_SS (м/кН), симметричная положительно определённая.
+        let mut a = field.flexibility.clone();
+        for i in 0..np {
+            for j in 0..np {
+                a[i * np + j] += 0.5 * (at(&p.g[idx[j]], piles[i]) + at(&p.g[idx[i]], piles[j]));
             }
         }
-        let lin = m.factorize()?;
-        let u_cases: Vec<Vec<f64>> = cases.iter().map(|lc| lin.solve(&m, lc)).collect::<Result<_, _>>()?;
+        let chol = cholesky(&a, np)?;
+        let mut u_cases = Vec::with_capacity(self.cases.len());
+        let mut t_cases = Vec::with_capacity(self.cases.len());
+        for u0 in &p.u0 {
+            let w0: Vec<f64> = piles.iter().map(|&n| at(u0, n)).collect();
+            let t = chol_solve(&chol, np, &w0);
+            let mut u = u0.clone();
+            for (j, &tj) in t.iter().enumerate() {
+                for (x, gx) in u.iter_mut().zip(&p.g[idx[j]]) {
+                    *x -= tj * gx;
+                }
+            }
+            u_cases.push(u);
+            t_cases.push(t);
+        }
+        // Перемещения в глобальной нумерации узлов плиты.
+        let global = |u: &[f64]| -> Vec<f64> {
+            let mut g = vec![0.0; m.ndof()];
+            for (k, &n) in p.nodes.iter().enumerate() {
+                g[6 * n..6 * n + 6].copy_from_slice(&u[6 * k..6 * k + 6]);
+            }
+            g
+        };
         let combine = |c: &[f64]| -> Vec<f64> {
-            let mut u = vec![0.0; m.ndof()];
+            let mut u = vec![0.0; 6 * p.nodes.len()];
             for (f, uc) in c.iter().zip(&u_cases) {
                 if *f != 0.0 {
                     for (a, b) in u.iter_mut().zip(uc) {
@@ -182,9 +219,11 @@ impl Problem<'_> {
                     }
                 }
             }
-            u
+            global(&u)
         };
-        let np = piles.len();
+        let pile_force = |c: &[f64]| -> Vec<f64> {
+            (0..np).map(|i| -c.iter().zip(&t_cases).map(|(f, t)| f * t[i]).sum::<f64>()).collect()
+        };
         let mut pile_n = vec![0.0f64; np];
         let mut s_max: f64 = 0.0;
         let mut ds_rel: f64 = 0.0;
@@ -216,9 +255,7 @@ impl Problem<'_> {
         // ПС1: нагрузки на сваи (R = −K·w, сжатие — положительное) и армирование.
         for c in &self.uls {
             let u = combine(c);
-            let w: Vec<f64> = piles.iter().map(|&n| u[6 * n + 2]).collect();
-            for i in 0..np {
-                let r: f64 = -(0..np).map(|j| k[i * np + j] * w[j]).sum::<f64>();
+            for (i, r) in pile_force(c).into_iter().enumerate() {
                 pile_n[i] = pile_n[i].max(r);
             }
             if design {
@@ -243,13 +280,15 @@ impl Problem<'_> {
             }
             if design {
                 if let Some(ctx) = self.crack_short {
-                    add(&capra_maury::design_sls_batch(ctx, &forces_of(&u), 10.0), &mut env);
+                    let d = crack_designs(ctx, &forces_of(&u), &env);
+                    add_some(&d, &mut env, &mut impossible);
                 }
             }
         }
         if design {
             if let (Some(ctx), Some(c)) = (self.crack_long, &self.sls_long) {
-                add(&capra_maury::design_sls_batch(ctx, &forces_of(&combine(c)), 10.0), &mut env);
+                let d = crack_designs(ctx, &forces_of(&combine(c)), &env);
+                add_some(&d, &mut env, &mut impossible);
             }
         }
         let (mut steel, mut area) = (0.0, 0.0);
@@ -307,6 +346,55 @@ impl Problem<'_> {
         };
         ev.feasible = !impossible && ev.worst(&self.limits) <= 1.0;
         Ok(ev)
+    }
+
+    /// Подготовка (один раз): K0, u0, G — см. [`Prepared`].
+    fn prepared(&self) -> Result<&Prepared, String> {
+        if let Some(p) = self.cache.get() {
+            return Ok(p);
+        }
+        let mut m = self.raft.clone();
+        let mut cases = self.cases.clone();
+        if let Some(b) = self.building {
+            if b.loads.len() != cases.len() {
+                return Err("здание: число наборов приведённых нагрузок не равно числу загружений".into());
+            }
+            m.blocks.push(b.block.clone());
+            for &d in b.block.dofs.iter().step_by(3) {
+                m.fixed.push((d / 6, [true, true, false, false, false, true]));
+            }
+            for (lc, extra) in cases.iter_mut().zip(&b.loads) {
+                lc.nodal.extend(extra.iter().copied());
+            }
+        }
+        let mut nodes: Vec<usize> = self.raft.shells.iter().flat_map(|s| s.nodes.iter().copied()).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        // Регуляризация: без свай плита не закреплена по вертикали.
+        let c = nodes.iter().fold([0.0, 0.0], |a, &n| [a[0] + self.xy(n)[0], a[1] + self.xy(n)[1]]);
+        let probe = Pile { x: c[0] / nodes.len() as f64, y: c[1] / nodes.len() as f64, head: self.pile_head, length: self.pile.length, d: self.pile.d, ea: self.pile.ea };
+        let k_pile = 1.0 / crate::piles::SinglePile::new(&probe, &(self.soil)(probe.x, probe.y)).compliance;
+        for &n in &nodes {
+            m.springs.push(Spring { node: n, k: [0.0, 0.0, 1e-6 * k_pile, 0.0, 0.0, 0.0] });
+        }
+        let lin = m.factorize()?;
+        let pick = |u: &[f64]| -> Vec<f64> { nodes.iter().flat_map(|&n| u[6 * n..6 * n + 6].to_vec()).collect() };
+        let fs: Vec<Vec<f64>> = cases.iter().map(|lc| m.load_vector(lc)).collect::<Result<_, _>>()?;
+        let u0 = lin.solve_many(&fs).iter().map(|u| pick(u)).collect();
+        let cand = self.candidates();
+        let units: Vec<Vec<f64>> = cand
+            .iter()
+            .map(|&n| {
+                let mut f = vec![0.0; m.ndof()];
+                f[6 * n + 2] = 1.0;
+                f
+            })
+            .collect();
+        let g = lin.solve_many(&units).iter().map(|u| pick(u)).collect();
+        let index = cand.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let pos = nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let _ = self.cache.set(Prepared { index, pos, nodes, u0, g });
+        Ok(self.cache.get().expect("только что заполнено"))
     }
 
     fn existing_distance(&self, p: [f64; 2]) -> f64 {
@@ -587,4 +675,69 @@ fn shell_area(c: &[V3]) -> f64 {
     let sub = |a: V3, b: V3| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     let d = if c.len() == 4 { fem::shell::cross(sub(c[2], c[0]), sub(c[3], c[1])) } else { fem::shell::cross(sub(c[1], c[0]), sub(c[2], c[0])) };
     0.5 * fem::shell::norm(d)
+}
+
+/// Плотный Холецкий n×n (построчно); L в нижнем треугольнике.
+fn cholesky(a: &[f64], n: usize) -> Result<Vec<f64>, String> {
+    let mut l = a.to_vec();
+    for j in 0..n {
+        let mut d = l[j * n + j];
+        for k in 0..j {
+            d -= l[j * n + k] * l[j * n + k];
+        }
+        if !(d > 0.0) {
+            return Err("система свайного поля не положительно определена".into());
+        }
+        let d = d.sqrt();
+        l[j * n + j] = d;
+        for i in j + 1..n {
+            let mut s = l[i * n + j];
+            for k in 0..j {
+                s -= l[i * n + k] * l[j * n + k];
+            }
+            l[i * n + j] = s / d;
+        }
+    }
+    Ok(l)
+}
+
+fn chol_solve(l: &[f64], n: usize, b: &[f64]) -> Vec<f64> {
+    let mut y = b.to_vec();
+    for i in 0..n {
+        for k in 0..i {
+            y[i] -= l[i * n + k] * y[k];
+        }
+        y[i] /= l[i * n + i];
+    }
+    for i in (0..n).rev() {
+        for k in i + 1..n {
+            y[i] -= l[k * n + i] * y[k];
+        }
+        y[i] /= l[i * n + i];
+    }
+    y
+}
+
+/// Подбор по трещинам только там, где сетки ПС1 (`env`) не проходят проверку раскрытия.
+fn crack_designs(ctx: &SlsContext, forces: &[PlateForces], env: &[[f64; 4]]) -> Vec<(usize, capra_maury::Design)> {
+    let fail: Vec<usize> = capra_maury::par_map(&(0..forces.len()).collect::<Vec<_>>(), |&e| {
+        let a = env[e];
+        let p = capra_maury::ProvidedMeshes { asx_top: a[0], asy_top: a[1], asx_bot: a[2], asy_bot: a[3], ds_x: ctx.ds, ds_y: ctx.ds };
+        (!capra_maury::cracks_ok(ctx, &forces[e], &p, 10.0)).then_some(e)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    let f: Vec<PlateForces> = fail.iter().map(|&e| forces[e]).collect();
+    fail.into_iter().zip(capra_maury::design_sls_batch(ctx, &f, 10.0)).collect()
+}
+
+fn add_some(d: &[(usize, capra_maury::Design)], env: &mut [[f64; 4]], impossible: &mut bool) {
+    for (e, des) in d {
+        *impossible |= !des.feasible();
+        let a = [des.top.asx, des.top.asy, des.bottom.asx, des.bottom.asy];
+        for k in 0..4 {
+            env[*e][k] = env[*e][k].max(a[k]);
+        }
+    }
 }

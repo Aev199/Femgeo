@@ -131,9 +131,18 @@ pub fn design(
         let f = forces(&combine(c));
         for (g, grp) in groups.iter().enumerate() {
             if let Some(ctx) = if long { grp.crack_long } else { grp.crack_short } {
-                let pfs: Vec<PlateForces> = members[g].iter().map(|&e| pf(&f[e])).collect();
+                // Подбор по трещинам — только где сетки ПС1 не проходят проверку раскрытия.
+                let fail: Vec<usize> = capra_maury::par_map(&members[g], |&e| {
+                    let a = out[e].required;
+                    let p = capra_maury::ProvidedMeshes { asx_top: a[0], asy_top: a[1], asx_bot: a[2], asy_bot: a[3], ds_x: ctx.ds, ds_y: ctx.ds };
+                    (!capra_maury::cracks_ok(ctx, &pf(&f[e]), &p, 10.0)).then_some(e)
+                })
+                .into_iter()
+                .flatten()
+                .collect();
+                let pfs: Vec<PlateForces> = fail.iter().map(|&e| pf(&f[e])).collect();
                 for (k, d) in capra_maury::design_sls_batch(ctx, &pfs, 10.0).iter().enumerate() {
-                    take(members[g][k], d, out);
+                    take(fail[k], d, out);
                 }
             }
         }

@@ -417,6 +417,7 @@ impl Service {
             crack_long: crack_long.as_ref(),
             punching: input.punching.then(|| Punching { rbt: c_uls.rbt, h0: r.h - r.cover, raft: Region { outer: r.outline.clone(), holes: r.holes.clone() } }),
             existing: input.existing.clone(),
+            cache: Default::default(),
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
         let area: f64 = polygon_area(&r.outline) - r.holes.iter().map(|h| polygon_area(h)).sum::<f64>();

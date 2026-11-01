@@ -324,6 +324,26 @@ impl Linear {
         self.eq.iter().map(|e| e.map_or(0.0, |i| x[(i, 0)])).collect()
     }
 
+    /// Решение для нескольких векторов нагрузки сразу (блоками по 64).
+    pub fn solve_many(&self, fs: &[Vec<f64>]) -> Vec<Vec<f64>> {
+        let mut out = Vec::with_capacity(fs.len());
+        for chunk in fs.chunks(64) {
+            let mut rhs = Mat::<f64>::zeros(self.neq, chunk.len());
+            for (c, f) in chunk.iter().enumerate() {
+                for (g, e) in self.eq.iter().enumerate() {
+                    if let Some(i) = e {
+                        rhs[(*i, c)] = f[g];
+                    }
+                }
+            }
+            let x = self.llt.solve(&rhs);
+            for c in 0..chunk.len() {
+                out.push(self.eq.iter().map(|e| e.map_or(0.0, |i| x[(i, c)])).collect());
+            }
+        }
+        out
+    }
+
     pub fn solve(&self, model: &Model, lc: &LoadCase) -> Result<Vec<f64>, String> {
         Ok(self.solve_vector(&model.load_vector(lc)?))
     }

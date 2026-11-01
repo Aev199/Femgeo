@@ -129,5 +129,6 @@ fn piles_carry_governing_uls_combination() {
     // определяющего сочетания и не больше суммы по всем.
     let sum: f64 = v["piles"].as_array().unwrap().iter().map(|p| p["n"].as_f64().unwrap()).sum();
     println!("Σ N = {sum:.0}, определяющее сочетание {expected:.0}");
-    assert!(sum >= expected * (1.0 - 1e-6) && sum <= expected * 1.05);
+    // Допуск 1e-4: регуляризующие пружины плиты (1e-6 жёсткости сваи в узле) берут ~1e-5 нагрузки.
+    assert!(sum >= expected * (1.0 - 1e-4) && sum <= expected * 1.05);
 }

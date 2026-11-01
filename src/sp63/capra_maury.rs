@@ -454,3 +454,20 @@ pub fn design_uls_batch(ctx: &UlsContext, forces: &[PlateForces], step_deg: f64)
 pub fn design_sls_batch(ctx: &SlsContext, forces: &[PlateForces], step_deg: f64) -> Vec<Design> {
     par_map(forces, |f| design_sls(ctx, f, step_deg))
 }
+
+/// Достаточно ли сеток `p` по ширине раскрытия трещин на всех фасетках (одна оценка a_crc на
+/// фасетку, без подбора). Несходимость сечения с трещиной — недостаточно.
+pub fn cracks_ok(ctx: &SlsContext, f: &PlateForces, p: &ProvidedMeshes, step_deg: f64) -> bool {
+    use super::strip::{self, StripRow, StripSection};
+    let sec = StripSection::shared(
+        ctx.h,
+        vec![StripRow { z: ctx.z_top, as_: 0.0 }, StripRow { z: ctx.z_bot, as_: 0.0 }],
+        ctx.concrete.clone(),
+        ctx.rebar.clone(),
+    );
+    facets(f, step_deg).into_iter().all(|(theta, n, m)| {
+        let (p_top, p_bot, _, _) = p.at(theta);
+        let r = strip::crack_width(&sec.with_areas(&[p_top, p_bot]), n, m, &[ctx.ds, ctx.ds], &ctx.crack);
+        !r.cracked || (r.converged && r.acrc_mm <= ctx.acrc_lim_mm)
+    })
+}
