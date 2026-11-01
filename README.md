@@ -13,19 +13,19 @@
 из geobase. Расчёты сечений по СП 63 — перенос из
 [OpenCS / CScore](https://github.com/rumata-ap/OpenCS).
 
-Статус: подбор свай, армирование плит и здания, окно приложения — готовы на
-синтетических данных; ждёт импорт модели ЛИРА. Подробно — `docs/DEV_STATE.md`,
-постановка — `docs/SPEC.md`, правила разработки — `AGENTS.md`, `CLAUDE.md`.
+Схема работы: **topo_reconstruct_rs** — вход и препроцессор (чтение ЛИРА,
+восстановление и ручная доводка геометрии, сетка, перенос нагрузок, окно);
+**Femgeo** — расчётная библиотека, которую topo вызывает в режиме «Фундамент».
 
-Приложение (`app/`): ядро на Rust в том же процессе, окно WebView2 (Tauri 2),
-дизайн-код GeoBase — как у `topo_reconstruct_rs`. Переносной exe для Windows
-собирается вручную в GitHub Actions (workflow «App», артефакт `femgeo-windows`).
+Статус: расчётное ядро готово на синтетических данных; приём сетки здания
+(`src/building.rs`) есть, подключение к подбору и режим в topo — в работе.
+Окно `app/` — временное, будет заменено режимом topo. Подробно —
+`docs/DEV_STATE.md`, постановка — `docs/SPEC.md`, правила — `AGENTS.md`, `CLAUDE.md`.
 
 ```sh
-cargo test                                         # тесты ядра
-cd app/ui && npm ci && npm run build               # интерфейс
-cargo run --release --example ui_server            # проверка в браузере: http://127.0.0.1:8787/
-cd app/src-tauri && npx --prefix ../ui tauri build # exe (Windows)
+cargo test --release                               # тесты
+cd app/ui && npm ci && npm run build               # временное окно
+cargo run --release --example ui_server            # http://127.0.0.1:8787/
 ```
 
 Лицензия: GPL-3.0 (`LICENSE`).
