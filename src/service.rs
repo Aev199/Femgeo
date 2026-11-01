@@ -519,7 +519,10 @@ impl Service {
         if let Some(r) = reference {
             variants.insert(0, r);
         }
-        let out = result_json(&raft, &variants, &input, has_reference);
+        let mut out = result_json(&raft, &variants, &input, has_reference);
+        if let Some(s) = &split {
+            out["notes"] = json!(s.notes);
+        }
         self.last = Some((input, raft, variants));
         self.last_reference = has_reference;
         Ok(out)

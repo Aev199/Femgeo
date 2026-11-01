@@ -41,7 +41,15 @@ pub struct Split {
     pub h: f64,
     /// Существующие сваи: (узел плиты, жёсткости).
     pub piles: Vec<(usize, [f64; 6])>,
+    /// Что исключено или приближено.
+    pub notes: Vec<String>,
 }
+
+/// Поворотные пружины-стабилизаторы узлов здания, кН·м/рад: гасят местные механизмы
+/// (вращение стержня вокруг оси, поворот из плоскости у пластин без «сверлящей» жёсткости).
+/// Перемещения не стабилизируются — силы передаются на плиту полностью; поступательно
+/// свободные части исключаются обходом связности.
+pub const STABILIZER: f64 = 1.0;
 
 fn signed_area(p: &[[f64; 2]]) -> f64 {
     let n = p.len();
@@ -128,6 +136,39 @@ pub fn split(m: &Mesh) -> Result<Split, String> {
     let z_mid = zs.iter().sum::<f64>() / zs.len() as f64;
     let region = boundary(&raft.nodes, &raft.shells)?;
 
+    // Здание: элементы, связанные с плитой (обход от узлов плиты); остальные — исключить.
+    let mut notes = vec![];
+    let (ns, nb) = (m.shells.len(), m.beams.len());
+    let elem_nodes = |e: usize| -> Vec<usize> { if e < ns { m.shells[e].nodes.clone() } else { vec![m.beams[e - ns].n1, m.beams[e - ns].n2] } };
+    let mut by_node: HashMap<usize, Vec<usize>> = HashMap::new();
+    for e in 0..ns + nb {
+        if e < ns && is_raft[e] {
+            continue;
+        }
+        for n in elem_nodes(e) {
+            by_node.entry(n).or_default().push(e);
+        }
+    }
+    let mut keep = vec![false; ns + nb];
+    let mut stack: Vec<usize> = raft_index.keys().copied().collect();
+    let mut seen: std::collections::HashSet<usize> = stack.iter().copied().collect();
+    while let Some(n) = stack.pop() {
+        for &e in by_node.get(&n).map_or(&[][..], |v| &v[..]) {
+            if !keep[e] {
+                keep[e] = true;
+                for q in elem_nodes(e) {
+                    if seen.insert(q) {
+                        stack.push(q);
+                    }
+                }
+            }
+        }
+    }
+    let dropped = (0..ns + nb).filter(|&e| !(e < ns && is_raft[e]) && !keep[e]).count();
+    if dropped > 0 {
+        notes.push(format!("элементы, не связанные с плитой, исключены: {dropped}"));
+    }
+
     // Здание: остальные элементы на своих узлах.
     let mut b_index: HashMap<usize, usize> = HashMap::new();
     let mut bm = Model::default();
@@ -138,12 +179,15 @@ pub fn split(m: &Mesh) -> Result<Split, String> {
         })
     };
     for (s, sh) in m.shells.iter().enumerate() {
-        if !is_raft[s] {
+        if !is_raft[s] && keep[s] {
             let nodes = sh.nodes.iter().map(|&n| node_of(n, &mut bm)).collect();
             bm.shells.push(Shell { nodes, mat: sh.mat });
         }
     }
-    for b in &m.beams {
+    for (i, b) in m.beams.iter().enumerate() {
+        if !keep[ns + i] {
+            continue;
+        }
         let (n1, n2) = (node_of(b.n1, &mut bm), node_of(b.n2, &mut bm));
         bm.beams.push(Beam { n1, n2, ..b.clone() });
     }
@@ -157,17 +201,24 @@ pub fn split(m: &Mesh) -> Result<Split, String> {
     let mut b_cases = vec![];
     for (c, loads) in m.cases.iter().enumerate() {
         let (mut rl, mut bl) = (LoadCase::default(), LoadCase::default());
+        let mut lost = 0.0;
         for &(n, f) in loads {
             if let Some(&r) = raft_index.get(&n) {
                 rl.nodal.push((r, f));
             } else if let Some(&b) = b_index.get(&n) {
                 bl.nodal.push((b, f));
             } else {
-                return Err(format!("загружение {}: нагрузка в узле {n}, не принадлежащем элементам", c + 1));
+                lost += f[2];
             }
+        }
+        if lost.abs() > 1e-6 {
+            notes.push(format!("загружение {}: нагрузка вне здания, связанного с плитой, не учтена: Fz = {lost:.1} кН", c + 1));
         }
         raft_cases.push(rl);
         b_cases.push(bl);
+    }
+    for n in 0..bm.nodes.len() {
+        bm.springs.push(crate::fem::Spring { node: n, k: [0.0, 0.0, 0.0, STABILIZER, STABILIZER, STABILIZER] });
     }
     let building = if bm.nodes.is_empty() { None } else { Some(condense::building(&bm, &interface, &b_cases)?) };
 
@@ -176,5 +227,5 @@ pub fn split(m: &Mesh) -> Result<Split, String> {
         .iter()
         .map(|&(n, k)| raft_index.get(&n).map(|&r| (r, k)).ok_or(format!("свая в узле {n} не на плите")))
         .collect::<Result<_, _>>()?;
-    Ok(Split { raft, raft_nodes, raft_cases, building, region, z_mid, h, piles })
+    Ok(Split { raft, raft_nodes, raft_cases, building, region, z_mid, h, piles, notes })
 }
