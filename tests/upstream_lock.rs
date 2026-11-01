@@ -33,6 +33,7 @@ fn every_ported_file_is_mapped_and_cites_pinned_commit() {
         let head: String = text.lines().take(12).collect::<Vec<_>>().join("\n");
         assert!(head.contains(short), "{ours}: в шапке нет коммита {short}");
     }
+    // Все файлы расчётов сечений перенесены из OpenCS; в `fem` — только указанные в карте.
     for entry in std::fs::read_dir(root.join("src/sp63")).unwrap() {
         let p = entry.unwrap().path();
         let rel = format!("src/sp63/{}", p.file_name().unwrap().to_string_lossy());

@@ -17,3 +17,4 @@ src/sp63/plate_shear.rs = CScore/ShellSimpl/PlateShearCheck.cs, CScore/Sp63Shear
 tests/sp63_shear.rs = CScore.Tests/ShellSimpl/PlateShearCheckTests.cs
 src/sp63/section.rs = CScore/CrossSection.cs, CScore/Diagramm.cs, CScore/LimitSectionStrainSolver.cs, CScore/CrossSectionLimitAdapter.cs
 src/sp63/pile.rs = CScore/LimitForceSolver.cs
+src/fem/shell.rs = CSfea.Core/Elements/Shell4.cs, CSfea.Core/Elements/Shell3.cs, CSfea.Core/Elements/ShellGeometry.cs, CSfea.Core/Elements/ShellElementMatrices.cs

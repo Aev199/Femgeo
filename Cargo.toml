@@ -7,6 +7,8 @@ description = "Подбор расстановки свай и армирова�
 publish = false
 
 [dependencies]
+# Разреженное разложение Холецкого
+faer = "0.22"
 
 [profile.release]
 opt-level = 3
