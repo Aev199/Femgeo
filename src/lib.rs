@@ -8,5 +8,6 @@ pub mod loads;
 pub mod optimize;
 pub mod piles;
 pub mod reinforce;
+pub mod report;
 pub mod service;
 pub mod sp63;

@@ -27,6 +27,7 @@ const FILTERS = {
   project: [{ name: 'Проект Femgeo', extensions: ['femgeo.json', 'json'] }],
   csv: [{ name: 'Таблица CSV', extensions: ['csv'] }],
   dxf: [{ name: 'Чертёж DXF', extensions: ['dxf'] }],
+  html: [{ name: 'Отчёт HTML', extensions: ['html'] }],
 };
 
 /// Путь к файлу: диалог в приложении, запрос пути при проверке через мост.

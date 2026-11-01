@@ -257,6 +257,8 @@ fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
 pub struct Service {
     geobase: Option<(String, geobase::Object)>,
     last: Option<(Input, Model, Vec<Evaluation>)>,
+    /// Первый вариант последнего расчёта — существующая расстановка.
+    last_reference: bool,
 }
 
 impl Service {
@@ -272,6 +274,7 @@ impl Service {
             "export_csv" => self.export(&args, false),
             "export_dxf" => self.export(&args, true),
             "export_rebar_dxf" => self.export_rebar(&args),
+            "export_report" => self.export_report(&args),
             "save_project" => {
                 let path = args.get("path").and_then(Value::as_str).ok_or("нет пути к файлу")?;
                 let input = args.get("input").ok_or("нет исходных данных")?;
@@ -460,6 +463,7 @@ impl Service {
         }
         let out = result_json(&raft, &variants, &input, has_reference);
         self.last = Some((input, raft, variants));
+        self.last_reference = has_reference;
         Ok(out)
     }
 
@@ -484,6 +488,21 @@ impl Service {
         let f = |k: usize| -> Vec<f64> { v.rebar.iter().map(|a| a[k] * 1e4).collect() };
         let (tx, ty, bx, by) = (f(0), f(1), f(2), f(3));
         let text = crate::reinforce::dxf_fields(raft, &[("AS_TOP_X", &tx), ("AS_TOP_Y", &ty), ("AS_BOT_X", &bx), ("AS_BOT_Y", &by)], "см²/м");
+        std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
+        Ok(json!({ "path": path }))
+    }
+}
+
+impl Service {
+    /// Отчёт по выбранному варианту: автономный HTML.
+    fn export_report(&self, args: &Value) -> Result<Value, String> {
+        let path = args.get("path").and_then(Value::as_str).ok_or("нет пути к файлу")?;
+        let i = args.get("variant").and_then(Value::as_u64).ok_or("не выбран вариант")? as usize;
+        let (input, raft, vs) = self.last.as_ref().ok_or("нет результата расчёта")?;
+        if i >= vs.len() {
+            return Err("нет такого варианта".into());
+        }
+        let text = crate::report::html(input, raft, vs, i, self.last_reference);
         std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
         Ok(json!({ "path": path }))
     }

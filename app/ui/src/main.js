@@ -275,7 +275,7 @@ function select(i) {
   checksTable();
   pileTable();
   render();
-  $('export-csv').disabled = $('export-dxf').disabled = $('export-rebar').disabled = i < 0;
+  $('export-csv').disabled = $('export-dxf').disabled = $('export-rebar').disabled = $('export-report').disabled = i < 0;
   const v = state.result.variants[i];
   $('subtitle').textContent = `${v.reference ? 'существующая: ' : ''}${v.count} свай, ${fmt(v.kg_m3, 1)} кг/м³`;
 }
@@ -321,7 +321,7 @@ $('open-project').onclick = async () => {
     const input = await call('load_project', { path });
     fill(input);
     state.result = null; state.current = -1;
-    for (const id of ['export-csv', 'export-dxf', 'export-rebar']) $(id).disabled = true;
+    for (const id of ['export-csv', 'export-dxf', 'export-rebar', 'export-report']) $(id).disabled = true;
     $('variants').tBodies[0].replaceChildren(); $('piles').tBodies[0].replaceChildren(); $('checks').tBodies[0].replaceChildren();
     $('variants-note').textContent = ''; $('legend').hidden = true;
     $('subtitle').textContent = path.split(/[\\/]/).pop();
@@ -371,7 +371,7 @@ $('open-geobase').onclick = async () => {
   } catch (e) { status(`GeoBase: ${e.message ?? e}`, true); }
 };
 
-for (const [id, kind, cmd] of [['export-csv', 'csv', 'export_csv'], ['export-dxf', 'dxf', 'export_dxf'], ['export-rebar', 'dxf', 'export_rebar_dxf']]) {
+for (const [id, kind, cmd] of [['export-csv', 'csv', 'export_csv'], ['export-dxf', 'dxf', 'export_dxf'], ['export-rebar', 'dxf', 'export_rebar_dxf'], ['export-report', 'html', 'export_report']]) {
   $(id).onclick = async () => {
     const path = await pickFile(kind, true);
     if (!path) return;

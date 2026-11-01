@@ -27,6 +27,11 @@ fn default_example_runs_and_exports() {
     s.dispatch("export_rebar_dxf", json!({ "path": rb, "variant": 0 }), &mut |_| {}).unwrap();
     let t = std::fs::read_to_string(&rb).unwrap();
     assert!(t.contains("AS_BOT_X") && t.contains("3DFACE"));
+    let rp = dir.join("femgeo_report.html");
+    s.dispatch("export_report", json!({ "path": rp, "variant": 0 }), &mut |_| {}).unwrap();
+    let t = std::fs::read_to_string(&rp).unwrap();
+    assert!(t.contains("<svg") && t.contains("п. 7.4") && t.contains("Ведомость свай"));
+    assert_eq!(t.matches("<circle").count(), vs[0]["count"].as_u64().unwrap() as usize);
     assert!(s.dispatch("nonsense", Value::Null, &mut |_| {}).is_err());
 }
 
