@@ -102,3 +102,44 @@ fn rigid_raft_on_pile_group_in_fem() {
         assert!((-u[6 * i + 2] - s).abs() < 1e-3 * s, "{} vs {s}", -u[6 * i + 2]);
     }
 }
+
+// ── правила расстановки ──
+
+use femgeo::piles::layout::{self, PileKind, Region, Rules, Violation};
+
+fn region() -> Region {
+    Region { outer: vec![[0.0, 0.0], [20.0, 0.0], [20.0, 12.0], [0.0, 12.0]], holes: vec![vec![[8.0, 4.0], [12.0, 4.0], [12.0, 8.0], [8.0, 8.0]]] }
+}
+
+#[test]
+fn layout_rules_and_violations() {
+    let r = Rules::sp24(PileKind::Bored, 0.6);
+    assert!((r.min_spacing - 1.6).abs() < 1e-12 && (r.min_edge - 0.4).abs() < 1e-12);
+    let reg = region();
+    assert!(reg.admits([2.0, 2.0], &r));
+    assert!(!reg.admits([0.2, 2.0], &r)); // у края
+    assert!(!reg.admits([10.0, 6.0], &r)); // в отверстии
+    assert!(!reg.admits([7.8, 6.0], &r)); // у отверстия
+    let v = layout::violations(&reg, &r, &[[2.0, 2.0], [3.0, 2.0], [30.0, 2.0], [5.0, 5.0]]);
+    assert!(v.contains(&Violation::Spacing(0, 1, 1.0)));
+    assert!(v.iter().any(|x| matches!(x, Violation::Edge(2, d) if *d < 0.0)));
+    assert_eq!(v.len(), 2);
+}
+
+/// Перенос и поворот всех свай и области вместе не меняют набор нарушений.
+#[test]
+fn layout_invariance() {
+    let r = Rules::sp24(PileKind::DrivenFriction, 0.35);
+    let pts = [[1.0, 1.0], [1.9, 1.2], [19.8, 6.0], [9.0, 9.0], [10.5, 9.4]];
+    let (s, c) = 0.7f64.sin_cos();
+    let tr = |p: [f64; 2]| [c * p[0] - s * p[1] + 100.0, s * p[0] + c * p[1] - 40.0];
+    let reg = region();
+    let reg2 = Region { outer: reg.outer.iter().map(|&p| tr(p)).collect(), holes: reg.holes.iter().map(|h| h.iter().map(|&p| tr(p)).collect()).collect() };
+    let pts2: Vec<[f64; 2]> = pts.iter().map(|&p| tr(p)).collect();
+    let key = |v: Vec<Violation>| {
+        let mut k: Vec<String> = v.iter().map(|x| match x { Violation::Edge(i, _) => format!("e{i}"), Violation::Spacing(i, j, _) => format!("s{i}-{j}") }).collect();
+        k.sort();
+        k
+    };
+    assert_eq!(key(layout::violations(&reg, &r, &pts)), key(layout::violations(&reg2, &r, &pts2)));
+}

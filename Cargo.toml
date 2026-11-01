@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 # Разреженное разложение Холецкого
 faer = "0.22"
+# Чтение объектов geobase (SQLite), только чтение
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 opt-level = 3
