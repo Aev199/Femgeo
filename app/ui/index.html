@@ -74,6 +74,8 @@
           <label class="field">Шаг осей не менее, м <input id="pile-spacing" type="number" step="any" placeholder="по СП 24"></label>
           <label class="field">До края не менее, м <input id="pile-edge" type="number" step="any" placeholder="по СП 24"></label>
         </div>
+        <label class="field">Существующие сваи, X Y — ориентир, не правило
+          <textarea id="existing" rows="2" spellcheck="false" placeholder="нет"></textarea></label>
       </section>
       <section class="gb-section">
         <h3>Грунт</h3>
@@ -92,11 +94,14 @@
         </div>
       </section>
       <section class="gb-section">
-        <h3>Пределы</h3>
+        <h3>Проверки</h3>
         <div class="grid2">
           <label class="field">Осадка, см <input id="s-max" type="number" step="any" min="1"></label>
           <label class="field">Разность Δs/L <input id="ds-rel" type="number" step="any" min="0.0005"></label>
+          <label class="field" title="Нормативные усилия = расчётные / γf">γf средний (ПС2) <input id="gamma-f" type="number" step="any" min="1"></label>
+          <label class="field" title="Непродолжительное раскрытие; 0 — без ПС2">aсrc, мм <input id="acrc" type="number" step="any" min="0"></label>
         </div>
+        <label class="check"><input type="checkbox" id="punching" checked> Продавливание плиты сваями, без поперечной арматуры</label>
       </section>
     </aside>
 
@@ -123,7 +128,7 @@
       <h3 class="panel-title">Варианты</h3>
       <div class="table-wrap variants">
         <table class="dialog__table" id="variants">
-          <thead><tr><th>Свай</th><th title="Теоретический расход арматуры плиты">кг/м³</th><th title="Наибольший коэффициент использования сваи по грунту и материалу">Кисп</th><th>s, см</th><th>Δs/L</th></tr></thead>
+          <thead><tr><th>Свай</th><th title="Теоретический расход арматуры плиты">кг/м³</th><th title="Наибольший коэффициент использования сваи по грунту и материалу">Кисп</th><th title="Продавливание плиты сваей">Прод.</th><th>s, см</th><th>Δs/L</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>

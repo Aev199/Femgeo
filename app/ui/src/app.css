@@ -55,3 +55,5 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 #plan .pile.over { stroke: var(--gb-error); stroke-width: 2.5; }
 #plan .borehole { fill: var(--gb-panel-bg); stroke: var(--gb-text-muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
 #plan text { font-family: var(--gb-font); fill: var(--gb-text-muted); }
+#plan .existing { fill: none; stroke: var(--gb-text-grey); stroke-width: 1; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; }
+#variants tbody tr.reference td { font-style: italic; border-bottom: 1px solid var(--gb-border); }

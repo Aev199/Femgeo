@@ -8,10 +8,10 @@ use serde_json::{json, Value};
 
 use crate::fem::{LoadCase, Model, Shell, ShellMaterial};
 use crate::geobase;
-use crate::optimize::{Evaluation, PileType, Problem, SettlementLimits};
+use crate::optimize::{Evaluation, PileType, Problem, Punching, SettlementLimits};
 use crate::piles::layout::{PileKind, Region, Rules};
 use crate::piles::{Layer, SoilColumn};
-use crate::sp63::capra_maury::{PlateSection, UlsContext};
+use crate::sp63::capra_maury::{PlateSection, SlsContext, SlsOptions, UlsContext};
 use crate::sp63::materials::{CalcType, ConcreteClass, ConcreteDiagramType, RebarClass};
 use crate::sp63::{pile, section::Section};
 
@@ -92,6 +92,28 @@ pub struct Input {
     /// "rows" — рядами (по умолчанию), "free" — свободная.
     #[serde(default = "rows")]
     pub layout: String,
+    /// Средний коэффициент надёжности по нагрузке: нормативные = расчётные / γf (ПС2).
+    #[serde(default = "gamma_f")]
+    pub gamma_f: f64,
+    /// Предельная ширина раскрытия трещин (непродолжительная), мм; 0 — без ПС2.
+    #[serde(default = "acrc_lim")]
+    pub acrc_lim: f64,
+    /// Проверять продавливание плиты сваями.
+    #[serde(default = "yes")]
+    pub punching: bool,
+    /// Существующие сваи (X, Y) — ориентир.
+    #[serde(default)]
+    pub existing: Vec<[f64; 2]>,
+}
+
+fn gamma_f() -> f64 {
+    1.15
+}
+fn acrc_lim() -> f64 {
+    0.3
+}
+fn yes() -> bool {
+    true
 }
 
 fn rows() -> String {
@@ -323,11 +345,20 @@ impl Service {
         }
         progress("сечение сваи");
 
-        let design = UlsContext::new(
-            &PlateSection { h: r.h, a_top: r.cover, a_bot: r.cover, ds_x: r.bar_d, ds_y: r.bar_d, concrete_diagram: ConcreteDiagramType::L3 },
-            &c_uls,
-            &r_uls,
-        );
+        let psec = PlateSection { h: r.h, a_top: r.cover, a_bot: r.cover, ds_x: r.bar_d, ds_y: r.bar_d, concrete_diagram: ConcreteDiagramType::L3 };
+        let design = UlsContext::new(&psec, &c_uls, &r_uls);
+        if !(input.gamma_f >= 1.0) {
+            return Err("γf должен быть не меньше 1".into());
+        }
+        let sls_ctx = (input.acrc_lim > 0.0).then(|| {
+            SlsContext::new(
+                &psec,
+                &cc.chars(CalcType::Sls),
+                &rebar(&r.rebar).expect("проверено").chars(CalcType::Sls),
+                Some((&c_uls, &r_uls)),
+                SlsOptions { acrc_lim_mm: input.acrc_lim, ..Default::default() },
+            )
+        });
         let soil = self.soil_fn(&input.soil)?;
         let region = input.region.clone().unwrap_or(Region { outer: r.outline.clone(), holes: r.holes.clone() });
         let problem = Problem {
@@ -349,6 +380,9 @@ impl Service {
             rebar_axis: [1.0, 0.0, 0.0],
             raft_h: r.h,
             building: None,
+            sls: sls_ctx.as_ref().map(|c| (c, input.gamma_f)),
+            punching: input.punching.then(|| Punching { rbt: c_uls.rbt, h0: r.h - r.cover, raft: Region { outer: r.outline.clone(), holes: r.holes.clone() } }),
+            existing: input.existing.clone(),
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
         let area: f64 = polygon_area(&r.outline) - r.holes.iter().map(|h| polygon_area(h)).sum::<f64>();
@@ -356,8 +390,14 @@ impl Service {
         let n_start = ((1.5 * total / pi.fd).ceil() as usize).max(4);
         progress("подбор расстановки");
         let mut report = |e: &crate::optimize::Evaluation| progress(&format!("вариант: {} свай, {:.1} кг/м³", e.piles.len(), e.kg_m3));
-        let variants = if input.layout == "free" { problem.frontier(n_start, 8, &mut report)? } else { problem.regular(&mut report)? };
-        let out = result_json(&raft, &variants, &input);
+        let mut variants = if input.layout == "free" { problem.frontier(n_start, 8, &mut report)? } else { problem.regular(&mut report)? };
+        // Существующая расстановка — первой строкой, для сравнения.
+        let reference = problem.reference()?;
+        let has_reference = reference.is_some();
+        if let Some(r) = reference {
+            variants.insert(0, r);
+        }
+        let out = result_json(&raft, &variants, &input, has_reference);
         self.last = Some((input, raft, variants));
         Ok(out)
     }
@@ -378,7 +418,7 @@ fn polygon_area(p: &[[f64; 2]]) -> f64 {
     (0..n).map(|i| p[i][0] * p[(i + 1) % n][1] - p[(i + 1) % n][0] * p[i][1]).sum::<f64>().abs() / 2.0
 }
 
-fn result_json(raft: &Model, vs: &[Evaluation], input: &Input) -> Value {
+fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bool) -> Value {
     json!({
         "nodes": raft.nodes.iter().map(|p| [p[0], p[1]]).collect::<Vec<_>>(),
         "elements": raft.shells.iter().map(|s| s.nodes.clone()).collect::<Vec<_>>(),
@@ -386,7 +426,11 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input) -> Value {
         "holes": input.raft.holes,
         "fd": input.pile.fd,
         "d": input.pile.d,
-        "variants": vs.iter().map(|v| json!({
+        "existing": input.existing,
+        "variants": vs.iter().enumerate().map(|(i, v)| json!({
+            "reference": has_reference && i == 0,
+            "util_punch": v.util_punch,
+            "shift": if v.shift.is_finite() { json!(v.shift) } else { Value::Null },
             "count": v.piles.len(),
             "kg_m3": v.kg_m3,
             "util_ground": v.util_ground,
@@ -467,5 +511,9 @@ pub fn default_input() -> Input {
         s_max: 0.15,
         ds_rel: 0.002,
         layout: rows(),
+        gamma_f: gamma_f(),
+        acrc_lim: acrc_lim(),
+        punching: true,
+        existing: vec![],
     }
 }

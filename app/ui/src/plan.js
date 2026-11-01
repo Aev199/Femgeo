@@ -106,6 +106,9 @@ export class Plan {
       const t = el('text', { x: b.x + s * 1.3, y: -b.y + s * 0.4, 'font-size': s * 1.6 }, g);
       t.textContent = b.name;
     }
+    for (const e of scene.existing || []) {
+      el('circle', { cx: e[0], cy: -e[1], r: (scene.piles?.[0]?.r ?? 0.3), class: 'existing' }, g);
+    }
     for (const p of scene.piles || []) {
       const c = el('circle', { cx: p.x, cy: -p.y, r: p.r, fill: p.fill, class: p.over ? 'pile over' : 'pile' }, g);
       el('title', {}, c).textContent = p.title;

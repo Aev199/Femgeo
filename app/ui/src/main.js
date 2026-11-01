@@ -72,6 +72,8 @@ function fill(input) {
     $('layers').value = writeRows(input.soil.layers.map((l) => [l.bottom, l.e, l.nu]));
   }
   $('s-max').value = Math.round(input.s_max * 100); $('ds-rel').value = input.ds_rel;
+  $('gamma-f').value = input.gamma_f; $('acrc').value = input.acrc_lim; $('punching').checked = input.punching;
+  $('existing').value = writeRows(input.existing);
 }
 
 function collect() {
@@ -102,6 +104,10 @@ function collect() {
     s_max: num('s-max') / 100,
     ds_rel: num('ds-rel'),
     layout: state.layout,
+    gamma_f: num('gamma-f'),
+    acrc_lim: num('acrc'),
+    punching: $('punching').checked,
+    existing: table('existing', 2, 'Существующие сваи'),
   };
 }
 
@@ -119,30 +125,38 @@ function preview() {
 
 // ── Результат ──
 
+const designVariants = () => state.result.variants.filter((v) => !v.reference);
+
 function variantTable() {
   const tbody = $('variants').tBodies[0];
   tbody.replaceChildren();
-  const vs = state.result.variants;
-  vs.forEach((v, i) => {
+  state.result.variants.forEach((v, i) => {
     const tr = tbody.insertRow();
-    tr.className = (i === state.current ? 'current ' : '') + (v.feasible ? '' : 'infeasible');
+    tr.className = [i === state.current ? 'current' : '', v.feasible ? '' : 'infeasible', v.reference ? 'reference' : ''].join(' ');
     const util = Math.max(v.util_ground, v.util_material);
-    for (const [text, cls] of [[v.count, 'num'], [fmt(v.kg_m3, 1), 'num'], [fmt(util, 2), 'num'], [fmt(v.s_max * 100, 1), 'num'], [fmt(v.ds_rel, 4), 'num']]) {
-      const td = tr.insertCell(); td.textContent = text; td.className = cls;
+    const cells = [[v.reference ? `${v.count} сущ.` : v.count], [fmt(v.kg_m3, 1)], [fmt(util, 2)], [v.util_punch ? fmt(v.util_punch, 2) : '—'], [fmt(v.s_max * 100, 1)], [fmt(v.ds_rel, 4)]];
+    for (const [text] of cells) {
+      const td = tr.insertCell(); td.textContent = text; td.className = 'num';
     }
+    tr.title = v.reference ? 'Существующая расстановка (сваи приведены к узлам сетки плиты)' : (v.shift != null ? `Среднее смещение от существующих свай ${fmt(v.shift, 2)} м` : '');
     tr.onclick = () => select(i);
   });
   for (const th of $('variants').tHead.rows[0].cells) th.classList.add('num');
+  const vs = designVariants();
   const feasible = vs.filter((v) => v.feasible);
-  $('variants-note').textContent = feasible.length
+  let note = feasible.length
     ? `Допустимых вариантов: ${feasible.length}. Меньше ${feasible[feasible.length - 1].count} свай — нарушается ${limiting(vs)}.`
     : `Допустимого варианта нет: ${reasons(vs[0]).join(', ')}.`;
+  const ref = state.result.variants.find((v) => v.reference);
+  if (ref) note += ref.feasible ? ' Существующая расстановка допустима.' : ` Существующая расстановка: ${reasons(ref).join(', ')}.`;
+  $('variants-note').textContent = note;
 }
 
 function reasons(v) {
   const r = [];
   if (v.util_ground > 1) r.push(`нагрузка на сваю ${fmt(v.util_ground, 2)}·Fd`);
   if (v.util_material > 1) r.push(`прочность сваи по материалу (Кисп ${fmt(v.util_material, 2)})`);
+  if (v.util_punch > 1) r.push(`продавливание плиты (Кисп ${fmt(v.util_punch, 2)})`);
   if (v.s_max > state.input.s_max) r.push(`осадка ${fmt(v.s_max * 100, 1)} см`);
   if (v.ds_rel > state.input.ds_rel) r.push(`Δs/L = ${fmt(v.ds_rel, 4)}`);
   if (v.design_impossible) r.push('армирование плиты не подбирается (мала толщина)');
@@ -152,7 +166,7 @@ function reasons(v) {
 function limiting(vs) {
   const v = vs[vs.length - 1];
   const lim = state.input;
-  const terms = [[v.util_ground, 'несущая способность свай по грунту'], [v.util_material, 'прочность свай по материалу'],
+  const terms = [[v.util_ground, 'несущая способность свай по грунту'], [v.util_material, 'прочность свай по материалу'], [v.util_punch, 'продавливание плиты'],
     [v.s_max / lim.s_max, 'предел осадки'], [v.ds_rel / lim.ds_rel, 'предел Δs/L']];
   return terms.sort((a, b) => b[0] - a[0])[0][1];
 }
@@ -184,12 +198,12 @@ function render(refit = false) {
   const v = R?.variants[state.current];
   if (!v) return preview();
   $('empty').hidden = true;
-  const scene = { outline: R.outline, holes: R.holes, nodes: R.nodes, elements: R.elements, boreholes: state.soil === 'geobase' ? state.geobase?.boreholes : [] };
+  const scene = { outline: R.outline, holes: R.holes, nodes: R.nodes, elements: R.elements, existing: R.existing, boreholes: state.soil === 'geobase' ? state.geobase?.boreholes : [] };
   const r = R.d / 2;
   if (state.mode === 'piles') {
     const fd = R.fd;
     scene.piles = v.piles.map((p, i) => ({ x: p.x, y: p.y, r, fill: color(p.n / fd), over: p.n > fd, title: `Свая ${i + 1}: N = ${fmt(p.n, 0)} кН, N/Fd = ${fmt(p.n / fd, 2)}` }));
-    legend('Нагрузка на сваю N/Fd', '0', '1', '', `Fd = ${fmt(fd, 0)} кН; обводка красным — больше Fd`);
+    legend('Нагрузка на сваю N/Fd', '0', '1', '', `Fd = ${fmt(fd, 0)} кН; красная обводка — больше Fd${R.existing.length ? '; пунктир — существующие сваи' : ''}`);
   } else if (state.mode === 'settlement') {
     const cellW = R.elements.map((e) => e.reduce((s, n) => s + v.w[n], 0) / e.length);
     const lo = Math.min(...cellW), hi = Math.max(...cellW);
@@ -214,7 +228,7 @@ function select(i) {
   render();
   $('export-csv').disabled = $('export-dxf').disabled = i < 0;
   const v = state.result.variants[i];
-  $('subtitle').textContent = `${v.count} свай, ${fmt(v.kg_m3, 1)} кг/м³`;
+  $('subtitle').textContent = `${v.reference ? 'существующая: ' : ''}${v.count} свай, ${fmt(v.kg_m3, 1)} кг/м³`;
 }
 
 // ── Действия ──
@@ -233,9 +247,9 @@ $('run').onclick = async () => {
     const result = await busy('Расчёт…', () => call('run', input));
     state.input = input;
     state.result = result;
-    const feasible = result.variants.filter((v) => v.feasible);
+    const feasible = result.variants.filter((v) => v.feasible && !v.reference);
     // По умолчанию — вариант с наименьшим числом свай среди допустимых.
-    select(feasible.length ? result.variants.indexOf(feasible[feasible.length - 1]) : 0);
+    select(feasible.length ? result.variants.indexOf(feasible[feasible.length - 1]) : result.variants.findIndex((v) => !v.reference));
     render(true);
     status(`Рассчитано вариантов: ${result.variants.length}, ${fmt((performance.now() - t) / 1000, 1)} с`);
   } catch (e) {

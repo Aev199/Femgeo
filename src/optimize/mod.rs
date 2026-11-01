@@ -10,7 +10,7 @@ use crate::fem::condense::Building;
 use crate::fem::{self, LoadCase, Model, SpringGroup, V3};
 use crate::piles::layout::{self, Region, Rules};
 use crate::piles::{Field, Pile, SoilColumn};
-use crate::sp63::capra_maury::{self, PlateForces, UlsContext};
+use crate::sp63::capra_maury::{self, PlateForces, SlsContext, UlsContext};
 
 /// Тип сваи (одинаковый для всех свай варианта).
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +54,24 @@ pub struct Problem<'a> {
     /// Надземная часть, сконденсированная на плиту (`fem::condense::building`); приведённые
     /// нагрузки — по одному набору на сочетание. None — здание не учитывается.
     pub building: Option<&'a Building>,
+    /// Подбор по ПС2 (трещины): контекст и средний γf (нормативные усилия = расчётные / γf).
+    pub sls: Option<(&'a SlsContext, f64)>,
+    /// Продавливание плиты сваями (п. 8.1.46 СП 63, без поперечной арматуры).
+    pub punching: Option<Punching>,
+    /// Существующие сваи (ориентир, не правило): старт свободного режима и предпочтение
+    /// позиций рядом с ними.
+    pub existing: Vec<[f64; 2]>,
+}
+
+/// Данные проверки продавливания.
+#[derive(Clone, Debug)]
+pub struct Punching {
+    /// Rbt, кПа.
+    pub rbt: f64,
+    /// Рабочая высота плиты, м.
+    pub h0: f64,
+    /// Контур плиты (часть расчётного контура вне плиты не учитывается).
+    pub raft: Region,
 }
 
 /// Оценка варианта.
@@ -73,6 +91,10 @@ pub struct Evaluation {
     pub rebar: Vec<[f64; 4]>,
     /// Осадка узлов плиты в сочетании с наибольшей осадкой, м (вниз — положительная).
     pub w_nodes: Vec<f64>,
+    /// Наибольший Кисп продавливания плиты сваей (0 — не проверялось).
+    pub util_punch: f64,
+    /// Среднее расстояние от свай до ближайшей существующей сваи, м (NaN — ориентира нет).
+    pub shift: f64,
     /// Подбор невозможен хотя бы в одном элементе.
     pub design_impossible: bool,
     pub feasible: bool,
@@ -81,7 +103,7 @@ pub struct Evaluation {
 impl Evaluation {
     /// Наибольший Кисп из ограничений (для сравнения недопустимых вариантов).
     pub fn worst(&self, lim: &SettlementLimits) -> f64 {
-        self.util_ground.max(self.util_material).max(self.s_max / lim.s_max).max(self.ds_rel / lim.ds_rel_max)
+        self.util_ground.max(self.util_material).max(self.util_punch).max(self.s_max / lim.s_max).max(self.ds_rel / lim.ds_rel_max)
     }
 }
 
@@ -182,8 +204,16 @@ impl Problem<'_> {
                     PlateForces { nx: f[0], ny: f[1], nxy: f[2], mx: f[3], my: f[4], mxy: f[5] }
                 })
                 .collect();
-            let designs = capra_maury::design_uls_batch(self.design, &forces, 10.0);
-            for (e, d) in designs.iter().enumerate() {
+            let mut designs = capra_maury::design_uls_batch(self.design, &forces, 10.0);
+            if let Some((ctx, gamma_f)) = self.sls {
+                let service: Vec<PlateForces> = forces
+                    .iter()
+                    .map(|f| PlateForces { nx: f.nx / gamma_f, ny: f.ny / gamma_f, nxy: f.nxy / gamma_f, mx: f.mx / gamma_f, my: f.my / gamma_f, mxy: f.mxy / gamma_f })
+                    .collect();
+                designs.extend(capra_maury::design_sls_batch(ctx, &service, 10.0));
+            }
+            for (i, d) in designs.iter().enumerate() {
+                let e = i % ne;
                 impossible |= !d.feasible();
                 let a = [d.top.asx, d.top.asy, d.bottom.asx, d.bottom.asy];
                 for k in 0..4 {
@@ -202,7 +232,36 @@ impl Problem<'_> {
         let n_max = pile_n.iter().copied().fold(0.0, f64::max);
         let util_ground = n_max / self.pile.fd_ground;
         let util_material = n_max * self.pile.material_util_per_kn;
+        let util_punch = match &self.punching {
+            None => 0.0,
+            Some(p) => {
+                let r = 0.5 * (self.pile.d + p.h0);
+                let u = std::f64::consts::PI * 2.0 * r;
+                piles
+                    .iter()
+                    .zip(&pile_n)
+                    .map(|(&n, &f)| {
+                        let [x, y] = self.xy(n);
+                        let inside = (0..72)
+                            .filter(|&k| {
+                                let a = k as f64 * std::f64::consts::PI / 36.0;
+                                p.raft.contains([x + r * a.cos(), y + r * a.sin()])
+                            })
+                            .count() as f64
+                            / 72.0;
+                        f / (p.rbt * u * inside.max(1e-9) * p.h0)
+                    })
+                    .fold(0.0, f64::max)
+            }
+        };
+        let shift = if self.existing.is_empty() {
+            f64::NAN
+        } else {
+            piles.iter().map(|&n| self.existing_distance(self.xy(n))).sum::<f64>() / piles.len().max(1) as f64
+        };
         let mut ev = Evaluation {
+            util_punch,
+            shift,
             piles: piles.to_vec(),
             pile_n,
             util_ground,
@@ -217,6 +276,43 @@ impl Problem<'_> {
         };
         ev.feasible = !impossible && ev.worst(&self.limits) <= 1.0;
         Ok(ev)
+    }
+
+    fn existing_distance(&self, p: [f64; 2]) -> f64 {
+        self.existing.iter().map(|&q| dist(p, q)).fold(f64::INFINITY, f64::min)
+    }
+
+    /// Существующие сваи, приведённые к допустимым позициям: каждая — к ближайшему
+    /// кандидату не дальше max(min_spacing, 2·шаг сетки), с соблюдением расстояний.
+    pub fn snap_existing(&self) -> Vec<usize> {
+        let cand = self.candidates();
+        let reach = self.rules.min_spacing.max(2.0 * self.mesh_step());
+        let mut pts = self.existing.clone();
+        pts.sort_by(|a, b| a[1].total_cmp(&b[1]).then(a[0].total_cmp(&b[0])));
+        let mut out: Vec<usize> = Vec::new();
+        for p in pts {
+            let best = cand
+                .iter()
+                .copied()
+                .filter(|&c| dist(self.xy(c), p) <= reach && !out.contains(&c) && self.spacing_ok(&out, usize::MAX, c))
+                .min_by(|&a, &b| dist(self.xy(a), p).total_cmp(&dist(self.xy(b), p)));
+            if let Some(c) = best {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Расчёт существующей расстановки (для сравнения); None — ориентира нет.
+    pub fn reference(&self) -> Result<Option<Evaluation>, String> {
+        if self.existing.is_empty() {
+            return Ok(None);
+        }
+        let p = self.snap_existing();
+        if p.is_empty() {
+            return Ok(None);
+        }
+        self.evaluate(&p).map(Some)
     }
 
     fn spacing_ok(&self, piles: &[usize], skip: usize, cand: usize) -> bool {
@@ -268,7 +364,9 @@ impl Problem<'_> {
             let (lo, hi) = (order[0], order[np - 1]);
             let target = self.xy(cur.piles[hi]);
             let mut near: Vec<usize> = cand.iter().copied().filter(|&c| self.spacing_ok(&cur.piles, lo, c) && !cur.piles.contains(&c)).collect();
-            near.sort_by(|&a, &b| dist(self.xy(a), target).total_cmp(&dist(self.xy(b), target)));
+            // Ориентир: при наличии существующих свай предпочтение позициям рядом с ними.
+            let key = |c: usize| dist(self.xy(c), target) + if self.existing.is_empty() { 0.0 } else { 0.5 * self.existing_distance(self.xy(c)) };
+            near.sort_by(|&a, &b| key(a).total_cmp(&key(b)));
             let mut moved = false;
             for &c in near.iter().take(3) {
                 let mut p = cur.piles.clone();
@@ -297,8 +395,10 @@ impl Problem<'_> {
             return Err("нет допустимых позиций свай".into());
         }
         // Недопустимо — больше свай (на 10 %), пока есть место.
-        let mut n = n_start;
-        let mut cur = self.improve(&cand, self.initial(&cand, n), moves)?;
+        // Старт — существующие сваи (если заданы), иначе жадная расстановка.
+        let snapped = self.snap_existing();
+        let mut n = if snapped.is_empty() { n_start } else { snapped.len() };
+        let mut cur = self.improve(&cand, if snapped.is_empty() { self.initial(&cand, n) } else { snapped }, moves)?;
         while !cur.feasible {
             let next = self.initial(&cand, (n as f64 * 1.1).ceil() as usize);
             if next.len() <= cur.piles.len() {

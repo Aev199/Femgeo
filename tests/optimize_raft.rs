@@ -70,6 +70,9 @@ fn run_with(building: Option<&femgeo::fem::condense::Building>, n: usize) -> (Ve
         rebar_axis: [1.0, 0.0, 0.0],
         raft_h: 0.8,
         building,
+        sls: None,
+        punching: None,
+        existing: vec![],
     };
     if n == usize::MAX {
         let t = std::time::Instant::now();
