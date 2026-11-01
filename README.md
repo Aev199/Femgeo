@@ -16,8 +16,15 @@
 Статус: этап 1 — подбор армирования плит по Капра–Мори (ПС1, ПС2) готов, см.
 `docs/DEV_STATE.md`. Постановка — `docs/SPEC.md`.
 
+Приложение (`app/`): ядро на Rust в том же процессе, окно WebView2 (Tauri 2),
+дизайн-код GeoBase — как у `topo_reconstruct_rs`. Переносной exe для Windows
+собирается вручную в GitHub Actions (workflow «App», артефакт `femgeo-windows`).
+
 ```sh
-cargo test --offline
+cargo test                                         # тесты ядра
+cd app/ui && npm ci && npm run build               # интерфейс
+cargo run --release --example ui_server            # проверка в браузере: http://127.0.0.1:8787/
+cd app/src-tauri && npx --prefix ../ui tauri build # exe (Windows)
 ```
 
 Лицензия: GPL-3.0 (`LICENSE`).

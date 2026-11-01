@@ -1,0 +1,57 @@
+/* Дополнения к дизайн-коду GeoBase (style.css) для окна Femgeo. */
+
+main { grid-template-columns: 330px 1fr 360px; }
+
+textarea {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--gb-fs-label);
+  color: var(--gb-text);
+  padding: 5px 8px;
+  border: 1px solid var(--gb-border);
+  border-radius: var(--gb-radius-control);
+  background: var(--gb-panel-bg);
+  resize: vertical;
+  outline: none;
+  font-weight: 400;
+}
+textarea:focus { border-color: var(--gb-accent); }
+.field input:invalid, .field textarea.invalid { border-color: var(--gb-error); }
+.gb-section.first { border-top: 0; padding-top: 0; }
+
+#view { display: block; }
+#plan { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; background: var(--gb-panel-bg); }
+#plan.dragging { cursor: grabbing; }
+.view-bar { position: absolute; top: 8px; left: 8px; z-index: 2; display: flex; gap: 6px; align-items: flex-start; }
+.view-bar .segmented { margin: 0; background: var(--gb-panel-bg); }
+.view-bar select { min-height: 30px; }
+.view-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--gb-text-grey); pointer-events: none; }
+
+.legend {
+  position: absolute; left: 8px; bottom: 8px; z-index: 2;
+  padding: 6px 8px; background: var(--gb-panel-bg);
+  border: 1px solid var(--gb-border); border-radius: var(--gb-radius-card);
+  font-size: var(--gb-fs-caption); color: var(--gb-text-muted);
+}
+.legend .title { font-weight: 600; color: var(--gb-text); margin-bottom: 4px; }
+.legend .scale { display: flex; align-items: center; gap: 6px; }
+.legend .bar { width: 160px; height: 10px; border: 1px solid var(--gb-border); }
+.legend .note { margin-top: 4px; }
+
+#results { display: flex; flex-direction: column; overflow: hidden; }
+#results .variants { max-height: 40%; flex-shrink: 0; }
+#results .piles { flex: 1; max-height: none; }
+#variants tbody tr { cursor: pointer; }
+#variants tbody tr.current td { background: var(--gb-accent-soft); }
+#variants tbody tr.infeasible td { color: var(--gb-error); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+#piles td.over { color: var(--gb-error); font-weight: 600; }
+
+/* План */
+#plan .raft { fill: none; stroke: var(--gb-text); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+#plan .cell { stroke: none; }
+#plan .mesh { fill: none; stroke: var(--gb-divider); stroke-width: 0.5; vector-effect: non-scaling-stroke; }
+#plan .pile { stroke: var(--gb-text); stroke-width: 1; vector-effect: non-scaling-stroke; }
+#plan .pile.over { stroke: var(--gb-error); stroke-width: 2.5; }
+#plan .borehole { fill: var(--gb-panel-bg); stroke: var(--gb-text-muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
+#plan text { font-family: var(--gb-font); fill: var(--gb-text-muted); }

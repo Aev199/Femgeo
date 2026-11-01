@@ -65,6 +65,10 @@ pub struct Evaluation {
     pub ds_rel: f64,
     /// Теоретический расход арматуры плиты, кг/м³ (огибающая по сочетаниям).
     pub kg_m3: f64,
+    /// Огибающая требуемой арматуры по элементам плиты, м²/м: [верх x, верх y, низ x, низ y].
+    pub rebar: Vec<[f64; 4]>,
+    /// Осадка узлов плиты в сочетании с наибольшей осадкой, м (вниз — положительная).
+    pub w_nodes: Vec<f64>,
     /// Подбор невозможен хотя бы в одном элементе.
     pub design_impossible: bool,
     pub feasible: bool,
@@ -117,11 +121,16 @@ impl Problem<'_> {
         let mut s_max: f64 = 0.0;
         let mut ds_rel: f64 = 0.0;
         let ne = m.shells.len();
-        let mut env = vec![0.0f64; ne];
+        let mut env = vec![[0.0f64; 4]; ne];
+        let mut w_nodes = vec![0.0f64; m.nodes.len()];
         let mut impossible = false;
         for lc in &self.combinations {
             let u = lin.solve(&m, lc)?;
             let w: Vec<f64> = piles.iter().map(|&n| u[6 * n + 2]).collect();
+            let s_lc = w.iter().map(|x| -x).fold(0.0, f64::max);
+            if s_lc >= s_max {
+                w_nodes = (0..m.nodes.len()).map(|n| -u[6 * n + 2]).collect();
+            }
             for i in 0..np {
                 // Реакция сваи R = −K·w (сжатие — положительное).
                 let r: f64 = -(0..np).map(|j| k[i * np + j] * w[j]).sum::<f64>();
@@ -147,14 +156,17 @@ impl Problem<'_> {
             let designs = capra_maury::design_uls_batch(self.design, &forces, 10.0);
             for (e, d) in designs.iter().enumerate() {
                 impossible |= !d.feasible();
-                env[e] = env[e].max(d.total());
+                let a = [d.top.asx, d.top.asy, d.bottom.asx, d.bottom.asy];
+                for k in 0..4 {
+                    env[e][k] = env[e][k].max(a[k]);
+                }
             }
         }
         let (mut steel, mut area) = (0.0, 0.0);
         for (e, s) in m.shells.iter().enumerate() {
             let c: Vec<V3> = s.nodes.iter().map(|&n| m.nodes[n]).collect();
             let a = shell_area(&c);
-            steel += env[e] * a;
+            steel += env[e].iter().sum::<f64>() * a;
             area += a;
         }
         let kg_m3 = steel * STEEL_DENSITY / (area * self.raft_h);
@@ -169,6 +181,8 @@ impl Problem<'_> {
             s_max,
             ds_rel,
             kg_m3,
+            rebar: env,
+            w_nodes,
             design_impossible: impossible,
             feasible: false,
         };
@@ -247,7 +261,7 @@ impl Problem<'_> {
     /// недопустима) снимаем по одной самую
     /// недогруженную сваю и улучшаем, пока вариант допустим. Возвращает лучшие варианты по
     /// числу свай (недопустимые — последним элементом, если допустимых нет).
-    pub fn frontier(&self, n_start: usize, moves: usize) -> Result<Vec<Evaluation>, String> {
+    pub fn frontier(&self, n_start: usize, moves: usize, progress: &mut dyn FnMut(&Evaluation)) -> Result<Vec<Evaluation>, String> {
         let cand = self.candidates();
         if cand.is_empty() {
             return Err("нет допустимых позиций свай".into());
@@ -271,15 +285,25 @@ impl Problem<'_> {
                 }
                 return Ok(out);
             }
+            progress(&cur);
             out.push(cur.clone());
             if cur.piles.len() <= 1 {
                 return Ok(out);
             }
-            let lo = (0..cur.piles.len()).min_by(|&a, &b| cur.pile_n[a].total_cmp(&cur.pile_n[b])).unwrap();
-            let mut p = cur.piles.clone();
-            p.remove(lo);
-            cur = self.improve(&cand, self.evaluate(&p)?, moves)?;
+            // Снимаем ≈ 3 % самых недогруженных свай (не меньше одной); у границы допустимости,
+            // если шаг больше одной сваи и вариант стал недопустим, — повтор по одной.
+            let step = ((cur.piles.len() as f64 * 0.03).round() as usize).max(1);
+            let next = self.remove(&cand, &cur, step, moves)?;
+            cur = if !next.feasible && step > 1 { self.remove(&cand, &cur, 1, moves)? } else { next };
         }
+    }
+
+    fn remove(&self, cand: &[usize], cur: &Evaluation, k: usize, moves: usize) -> Result<Evaluation, String> {
+        let mut order: Vec<usize> = (0..cur.piles.len()).collect();
+        order.sort_by(|&a, &b| cur.pile_n[a].total_cmp(&cur.pile_n[b]));
+        let drop: std::collections::HashSet<usize> = order.into_iter().take(k.min(cur.piles.len() - 1)).collect();
+        let p: Vec<usize> = cur.piles.iter().enumerate().filter(|(i, _)| !drop.contains(i)).map(|(_, &n)| n).collect();
+        self.improve(cand, self.evaluate(&p)?, moves)
     }
 
     /// Нарушения правил расстановки варианта (проверка результата).

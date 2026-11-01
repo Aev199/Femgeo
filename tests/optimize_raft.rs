@@ -66,7 +66,7 @@ fn run() -> Vec<femgeo::optimize::Evaluation> {
         raft_h: 0.8,
     };
     let t = std::time::Instant::now();
-    let f = p.frontier(49, 8).unwrap();
+    let f = p.frontier(49, 8, &mut |_| {}).unwrap();
     println!("фронт за {:?}", t.elapsed());
     for e in &f {
         println!("свай {:2}: кг/м³ {:6.1}, Кисп грунт {:.3}, материал {:.3}, s {:.4} м, Δs/L {:.5}, допустим {}", e.piles.len(), e.kg_m3, e.util_ground, e.util_material, e.s_max, e.ds_rel, e.feasible);

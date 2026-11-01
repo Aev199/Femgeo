@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Femgeo</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./src/style.css">
+  <link rel="stylesheet" href="./src/app.css">
+</head>
+<body>
+  <header class="appbar">
+    <div class="appbar__brand">
+      <span class="appbar__title">Femgeo</span>
+      <span class="appbar__subtitle" id="subtitle">расстановка свай под плитой</span>
+    </div>
+    <span class="appbar__sep"></span>
+    <div class="appbar__group">
+      <button id="run" class="primary" title="Подобрать расстановку свай: фронт вариантов «число свай — расход арматуры»">Рассчитать</button>
+    </div>
+    <span class="appbar__spacer"></span>
+    <div class="appbar__group">
+      <span class="appbar__label">Выбранный вариант</span>
+      <button id="export-csv" disabled title="Координаты свай и нагрузки (CSV)">Сваи CSV…</button>
+      <button id="export-dxf" disabled title="Контур плиты и сваи (DXF)">План DXF…</button>
+    </div>
+  </header>
+
+  <main>
+    <aside class="gb-panel" id="input">
+      <section class="gb-section first">
+        <h3>Плита</h3>
+        <label class="field">Контур, м: X Y по строкам
+          <textarea id="outline" rows="4" spellcheck="false"></textarea></label>
+        <label class="field">Отверстия: контуры через пустую строку
+          <textarea id="holes" rows="2" spellcheck="false" placeholder="нет"></textarea></label>
+        <div class="grid2">
+          <label class="field">Толщина, м <input id="raft-h" type="number" step="any" min="0.1"></label>
+          <label class="field">Отметка низа, м <input id="raft-z" type="number" step="any"></label>
+          <label class="field">Элемент сетки, м <input id="raft-mesh" type="number" step="any" min="0.2"></label>
+          <label class="field">До центра арматуры, м <input id="raft-cover" type="number" step="any" min="0.02"></label>
+          <label class="field">Бетон <select id="raft-concrete" class="concrete"></select></label>
+          <label class="field">Арматура <select id="raft-rebar" class="rebar"></select></label>
+          <label class="field">Диаметр стержней, мм <input id="raft-bar" type="number" step="any" min="8"></label>
+        </div>
+      </section>
+      <section class="gb-section">
+        <h3>Нагрузки, расчётные</h3>
+        <label class="field">Равномерная с весом плиты, кПа <input id="q" type="number" step="any"></label>
+        <label class="field">Сосредоточенные: X Y N, м и кН
+          <textarea id="points" rows="3" spellcheck="false" placeholder="нет"></textarea></label>
+      </section>
+      <section class="gb-section">
+        <h3>Сваи</h3>
+        <div class="grid2">
+          <label class="field">Диаметр, м <input id="pile-d" type="number" step="any" min="0.2"></label>
+          <label class="field">Длина, м <input id="pile-l" type="number" step="any" min="3"></label>
+          <label class="field">Fd по грунту, кН <input id="pile-fd" type="number" step="any" min="1"></label>
+          <label class="field">Тип <select id="pile-kind">
+            <option value="bored">буровая</option>
+            <option value="driven">забивная висячая</option>
+            <option value="end_bearing">свая-стойка</option>
+          </select></label>
+          <label class="field">Бетон <select id="pile-concrete" class="concrete"></select></label>
+          <label class="field">Арматура <select id="pile-rebar" class="rebar"></select></label>
+          <label class="field">Стержней <input id="pile-bars" type="number" step="any" min="4"></label>
+          <label class="field">Диаметр, мм <input id="pile-bar" type="number" step="any" min="10"></label>
+          <label class="field">До центра стержней, м <input id="pile-cover" type="number" step="any" min="0.03"></label>
+          <label class="field">l₀ для eₐ, м <input id="pile-l0" type="number" step="any" min="0"></label>
+          <label class="field">Шаг осей не менее, м <input id="pile-spacing" type="number" step="any" placeholder="по СП 24"></label>
+          <label class="field">До края не менее, м <input id="pile-edge" type="number" step="any" placeholder="по СП 24"></label>
+        </div>
+      </section>
+      <section class="gb-section">
+        <h3>Грунт</h3>
+        <div class="segmented" id="soil-source">
+          <button data-source="geobase">GeoBase</button>
+          <button data-source="layers" class="current">Слои вручную</button>
+        </div>
+        <div id="soil-geobase" hidden>
+          <button id="open-geobase">Открыть объект…</button>
+          <p class="hint" id="geobase-info">объект не открыт</p>
+        </div>
+        <div id="soil-layers">
+          <label class="field">Отметка поверхности, м <input id="soil-top" type="number" step="any"></label>
+          <label class="field">Слои: подошва, м; E, кПа; ν
+            <textarea id="layers" rows="3" spellcheck="false"></textarea></label>
+        </div>
+      </section>
+      <section class="gb-section">
+        <h3>Пределы</h3>
+        <div class="grid2">
+          <label class="field">Осадка, см <input id="s-max" type="number" step="any" min="1"></label>
+          <label class="field">Разность Δs/L <input id="ds-rel" type="number" step="any" min="0.0005"></label>
+        </div>
+      </section>
+    </aside>
+
+    <section id="view">
+      <div class="view-bar">
+        <div class="segmented" id="mode">
+          <button data-mode="piles" class="current">Нагрузки на сваи</button>
+          <button data-mode="settlement">Осадки</button>
+          <button data-mode="rebar">Армирование</button>
+        </div>
+        <select id="rebar-dir" hidden title="Направление и грань">
+          <option value="2">низ, X</option>
+          <option value="3">низ, Y</option>
+          <option value="0">верх, X</option>
+          <option value="1">верх, Y</option>
+        </select>
+      </div>
+      <svg id="plan" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div class="legend" id="legend" hidden></div>
+      <div class="view-empty" id="empty">Задайте исходные данные и нажмите «Рассчитать»</div>
+    </section>
+
+    <aside class="gb-panel" id="results">
+      <h3 class="panel-title">Варианты</h3>
+      <div class="table-wrap variants">
+        <table class="dialog__table" id="variants">
+          <thead><tr><th>Свай</th><th title="Теоретический расход арматуры плиты">кг/м³</th><th title="Наибольший коэффициент использования сваи по грунту и материалу">Кисп</th><th>s, см</th><th>Δs/L</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint" id="variants-note"></p>
+      <h3 class="panel-title">Сваи выбранного варианта</h3>
+      <div class="table-wrap piles">
+        <table class="dialog__table" id="piles">
+          <thead><tr><th>№</th><th>X, м</th><th>Y, м</th><th>N, кН</th><th>N/Fd</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="statusbar"><span id="status">Готово</span></footer>
+  <div id="busy" hidden><div class="box" id="busy-text">Расчёт…</div></div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
