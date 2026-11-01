@@ -596,34 +596,56 @@ impl Problem<'_> {
             let full = self.evaluate(&cur.piles)?;
             progress(&full);
             found.push(full);
-            // Варианты снятия одного ряда (X) или столбца (Y).
-            let mut best: Option<(Evaluation, Vec<f64>, Vec<f64>)> = None;
+            // Варианты снятия одного ряда (X) или столбца (Y): допустимые, с наименьшим Кисп;
+            // среди близких (в пределах 2 %) — наиболее симметричный набор рядов.
+            let mut options: Vec<(Evaluation, Vec<f64>, Vec<f64>)> = Vec::new();
             for axis in 0..2 {
                 let n = if axis == 0 { xs.len() } else { ys.len() };
                 if n <= 2 {
                     continue;
                 }
+                let (v, lo, hi) = if axis == 0 { (&xs, x0, x1) } else { (&ys, y0, y1) };
+                // Одиночные ряды и пары зеркальных рядов (относительно середины области).
+                let mut sets: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
                 for i in 0..n {
-                    let (mut nx, mut ny) = (xs.clone(), ys.clone());
-                    if axis == 0 { nx.remove(i); } else { ny.remove(i); }
+                    for j in i + 1..n {
+                        if (v[i] + v[j] - lo - hi).abs() < tol && n - 2 >= 2 {
+                            sets.push(vec![i, j]);
+                        }
+                    }
+                }
+                for set in sets {
+                    let keep = |w: &[f64]| -> Vec<f64> { w.iter().enumerate().filter(|(k, _)| !set.contains(k)).map(|(_, &x)| x).collect() };
+                    let (nx, ny) = if axis == 0 { (keep(&xs), ys.clone()) } else { (xs.clone(), keep(&ys)) };
                     let piles = layout(&nx, &ny);
                     if piles.len() < 3 {
                         continue;
                     }
-                    let ev = self.evaluate_fast(&piles)?;
-                    let better = match &best {
-                        None => true,
-                        Some((b, _, _)) => match (ev.feasible, b.feasible) {
-                            (true, false) => true,
-                            (false, true) => false,
-                            _ => ev.worst(&self.limits) < b.worst(&self.limits),
-                        },
-                    };
-                    if better {
-                        best = Some((ev, nx, ny));
-                    }
+                    options.push((self.evaluate_fast(&piles)?, nx, ny));
                 }
             }
+            let asym = |v: &[f64], lo: f64, hi: f64| -> f64 {
+                v.iter().map(|&a| v.iter().map(|&b| (lo + hi - a - b).abs()).fold(f64::INFINITY, f64::min)).sum()
+            };
+            let feasible: Vec<&(Evaluation, Vec<f64>, Vec<f64>)> = options.iter().filter(|o| o.0.feasible).collect();
+            let symmetric: Vec<&&(Evaluation, Vec<f64>, Vec<f64>)> =
+                feasible.iter().filter(|o| asym(&o.1, x0, x1) + asym(&o.2, y0, y1) < tol).collect();
+            let best = if feasible.is_empty() {
+                None
+            } else if !symmetric.is_empty() {
+                symmetric.into_iter().min_by(|a, b| a.0.worst(&self.limits).total_cmp(&b.0.worst(&self.limits))).map(|o| (*o).clone())
+            } else {
+                let w_min = feasible.iter().map(|o| o.0.worst(&self.limits)).fold(f64::INFINITY, f64::min);
+                feasible
+                    .into_iter()
+                    .filter(|o| o.0.worst(&self.limits) <= w_min * 1.02)
+                    .min_by(|a, b| {
+                        let sa = asym(&a.1, x0, x1) + asym(&a.2, y0, y1);
+                        let sb = asym(&b.1, x0, x1) + asym(&b.2, y0, y1);
+                        sa.total_cmp(&sb).then(a.0.worst(&self.limits).total_cmp(&b.0.worst(&self.limits)))
+                    })
+                    .cloned()
+            };
             match best {
                 Some((ev, nx, ny)) if ev.feasible => {
                     cur = ev;

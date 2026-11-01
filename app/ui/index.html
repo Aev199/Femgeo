@@ -16,6 +16,11 @@
     </div>
     <span class="appbar__sep"></span>
     <div class="appbar__group">
+      <button id="open-project" title="Открыть исходные данные (.femgeo.json)">Открыть…</button>
+      <button id="save-project" title="Сохранить исходные данные (.femgeo.json)">Сохранить…</button>
+    </div>
+    <span class="appbar__sep"></span>
+    <div class="appbar__group">
       <button id="run" class="primary" title="Подобрать расстановку свай: фронт вариантов «число свай — расход арматуры»">Рассчитать</button>
     </div>
     <span class="appbar__spacer"></span>
@@ -47,7 +52,7 @@
       </section>
       <section class="gb-section">
         <h3>Загружения, нормативные</h3>
-        <label class="field" title="Вид: П — постоянное, Д — длительное, К — кратковременное; ψдл — длительная доля кратковременного (СП 20). Сочетания по СП 20, п. 6.4">Вид γf ψдл q (кПа), по строкам
+        <label class="field" title="Вид: П — постоянное, Д — длительное, К — кратковременное; ψдл — длительная доля кратковременного (СП 20); «р» в конце — значения расчётные (нормативные = расчётные / γf). Сочетания по СП 20, п. 6.4">Вид γf ψдл q (кПа) [р — расчётные], по строкам
           <textarea id="cases" rows="3" spellcheck="false"></textarea></label>
         <label class="field">Сосредоточенные: № загружения X Y N (м, кН)
           <textarea id="points" rows="2" spellcheck="false" placeholder="нет"></textarea></label>
@@ -135,6 +140,8 @@
         </table>
       </div>
       <p class="hint" id="variants-note"></p>
+      <h3 class="panel-title">Проверки выбранного варианта</h3>
+      <table class="dialog__table checks" id="checks"><tbody></tbody></table>
       <h3 class="panel-title">Сваи выбранного варианта</h3>
       <div class="table-wrap piles">
         <table class="dialog__table" id="piles">

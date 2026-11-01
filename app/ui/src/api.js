@@ -24,6 +24,7 @@ export async function onProgress(handler) {
 
 const FILTERS = {
   geobase: [{ name: 'Объект GeoBase', extensions: ['db'] }],
+  project: [{ name: 'Проект Femgeo', extensions: ['femgeo.json', 'json'] }],
   csv: [{ name: 'Таблица CSV', extensions: ['csv'] }],
   dxf: [{ name: 'Чертёж DXF', extensions: ['dxf'] }],
 };

@@ -52,6 +52,9 @@ pub struct CaseInput {
     pub psi_long: f64,
     /// Равномерная нагрузка, кПа (вниз — положительная).
     pub q: f64,
+    /// Значения заданы расчётными (нормативные = расчётные / γf).
+    #[serde(default)]
+    pub design: bool,
     #[serde(default)]
     pub points: Vec<PointLoad>,
 }
@@ -269,6 +272,22 @@ impl Service {
             "export_csv" => self.export(&args, false),
             "export_dxf" => self.export(&args, true),
             "export_rebar_dxf" => self.export_rebar(&args),
+            "save_project" => {
+                let path = args.get("path").and_then(Value::as_str).ok_or("нет пути к файлу")?;
+                let input = args.get("input").ok_or("нет исходных данных")?;
+                let text = serde_json::to_string_pretty(&json!({ "femgeo": 1, "input": input })).unwrap();
+                std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
+                Ok(json!({ "path": path }))
+            }
+            "load_project" => {
+                let path = args.get("path").and_then(Value::as_str).ok_or("нет пути к файлу")?;
+                let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+                let v: Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+                let input = v.get("input").cloned().ok_or("файл не является проектом Femgeo")?;
+                // Проверка формата: те же правила, что при расчёте.
+                serde_json::from_value::<Input>(input.clone()).map_err(|e| format!("проект: {e}"))?;
+                Ok(input)
+            }
             _ => Err(format!("неизвестная команда «{command}»")),
         }
     }
@@ -341,10 +360,12 @@ impl Service {
                 return Err(format!("загружение «{}»: γf должен быть не меньше 1", c.name));
             }
             kinds.push(crate::loads::Case { kind, gamma_f: c.gamma_f, psi_long: c.psi_long.clamp(0.0, 1.0) });
-            let mut lc = LoadCase { pressure: (0..raft.shells.len()).map(|s| (s, -c.q)).collect(), ..Default::default() };
+            // Загружения хранятся нормативными; расчётные значения приводятся делением на γf.
+            let to_norm = if c.design { 1.0 / c.gamma_f } else { 1.0 };
+            let mut lc = LoadCase { pressure: (0..raft.shells.len()).map(|s| (s, -c.q * to_norm)).collect(), ..Default::default() };
             for p in &c.points {
                 let k = (0..raft.nodes.len()).min_by(|&a, &b| dist2(raft.nodes[a], [p.x, p.y, 0.0]).total_cmp(&dist2(raft.nodes[b], [p.x, p.y, 0.0]))).unwrap();
-                lc.nodal.push((k, [0.0, 0.0, -p.n, 0.0, 0.0, 0.0]));
+                lc.nodal.push((k, [0.0, 0.0, -p.n * to_norm, 0.0, 0.0, 0.0]));
             }
             cases.push(lc);
         }
@@ -425,7 +446,7 @@ impl Service {
         let total = combos
             .uls
             .iter()
-            .map(|c| c.iter().zip(&input.cases).map(|(f, k)| f * (k.q * area + k.points.iter().map(|p| p.n).sum::<f64>())).sum::<f64>())
+            .map(|c| c.iter().zip(&input.cases).map(|(f, k)| f * (k.q * area + k.points.iter().map(|p| p.n).sum::<f64>()) / if k.design { k.gamma_f } else { 1.0 }).sum::<f64>())
             .fold(0.0, f64::max);
         let n_start = ((1.5 * total / pi.fd).ceil() as usize).max(4);
         progress("подбор расстановки");
@@ -544,8 +565,8 @@ pub fn default_input() -> Input {
             bar_d: 0.02,
         },
         cases: vec![
-            CaseInput { name: "Собственный вес и постоянные".into(), kind: "permanent".into(), gamma_f: 1.1, psi_long: 0.0, q: 130.0, points: vec![] },
-            CaseInput { name: "Полезная".into(), kind: "short".into(), gamma_f: 1.2, psi_long: 0.35, q: 30.0, points: vec![] },
+            CaseInput { name: "Собственный вес и постоянные".into(), kind: "permanent".into(), gamma_f: 1.1, psi_long: 0.0, q: 130.0, design: false, points: vec![] },
+            CaseInput { name: "Полезная".into(), kind: "short".into(), gamma_f: 1.2, psi_long: 0.35, q: 30.0, design: false, points: vec![] },
         ],
         pile: PileInput {
             d: 0.6,

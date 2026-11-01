@@ -100,6 +100,21 @@ export class Plan {
       el('polygon', { points: ring.map(pt).join(' '), class: 'raft' }, g);
     }
     const size = Math.max(bounds[2] - bounds[0], bounds[3] - bounds[1]);
+    // Габаритные размеры плиты: под планом и слева, как на чертеже.
+    const [ox0, oy0, ox1, oy1] = [Math.min(...scene.outline.map((p) => p[0])), Math.min(...scene.outline.map((p) => p[1])), Math.max(...scene.outline.map((p) => p[0])), Math.max(...scene.outline.map((p) => p[1]))];
+    const off = size * 0.04, fs = size * 0.022;
+    const dim = (x1, y1, x2, y2, text, vertical) => {
+      el('line', { x1, y1: -y1, x2, y2: -y2, class: 'dim' }, g);
+      for (const [x, y] of [[x1, y1], [x2, y2]]) {
+        el('line', vertical ? { x1: x - off * 0.3, y1: -y, x2: x + off * 0.3, y2: -y, class: 'dim' } : { x1: x, y1: -y - off * 0.3, x2: x, y2: -y + off * 0.3, class: 'dim' }, g);
+      }
+      const t = el('text', vertical
+        ? { x: x1 - fs * 0.5, y: -(y1 + y2) / 2, 'font-size': fs, 'text-anchor': 'middle', transform: `rotate(-90 ${x1 - fs * 0.5} ${-(y1 + y2) / 2})` }
+        : { x: (x1 + x2) / 2, y: -y1 + fs * 1.3, 'font-size': fs, 'text-anchor': 'middle' }, g);
+      t.textContent = text;
+    };
+    dim(ox0, oy0 - off, ox1, oy0 - off, (ox1 - ox0).toFixed(2).replace('.', ','), false);
+    dim(ox0 - off, oy0, ox0 - off, oy1, (oy1 - oy0).toFixed(2).replace('.', ','), true);
     for (const b of scene.boreholes || []) {
       const s = size * 0.012;
       el('polygon', { points: `${b.x},${-b.y - s} ${b.x - s},${-b.y + s * 0.7} ${b.x + s},${-b.y + s * 0.7}`, class: 'borehole' }, g);

@@ -132,3 +132,24 @@ fn piles_carry_governing_uls_combination() {
     // Допуск 1e-4: регуляризующие пружины плиты (1e-6 жёсткости сваи в узле) берут ~1e-5 нагрузки.
     assert!(sum >= expected * (1.0 - 1e-4) && sum <= expected * 1.05);
 }
+
+/// Расчётные значения нагрузки приводятся к нормативным: тот же результат, что при
+/// нормативных q = q_р/γf; проект сохраняется и открывается без потерь.
+#[test]
+fn design_values_and_project_roundtrip() {
+    let mut s = Service::new();
+    let mut i = small(&mut s);
+    i["acrc_long"] = json!(0.0);
+    i["acrc_short"] = json!(0.0);
+    i["cases"] = json!([{ "name": "П", "kind": "permanent", "gamma_f": 1.1, "q": 110.0, "design": true }]);
+    let a = run(&mut s, i.clone());
+    let mut j = i.clone();
+    j["cases"] = json!([{ "name": "П", "kind": "permanent", "gamma_f": 1.1, "q": 100.0 }]);
+    let b = run(&mut s, j);
+    let n = |o: &Value| o["variants"][0]["piles"][0]["n"].as_f64().unwrap();
+    assert!((n(&a) - n(&b)).abs() < 1e-6 * n(&b));
+    let path = std::env::temp_dir().join("femgeo_project.femgeo.json");
+    s.dispatch("save_project", json!({ "path": path, "input": i }), &mut |_| {}).unwrap();
+    let back = s.dispatch("load_project", json!({ "path": path }), &mut |_| {}).unwrap();
+    assert_eq!(back, i);
+}

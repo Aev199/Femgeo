@@ -62,7 +62,7 @@ function fill(input) {
   $('raft-cover').value = r.cover; $('raft-concrete').value = r.concrete; $('raft-rebar').value = r.rebar;
   $('raft-bar').value = Math.round(r.bar_d * 1000);
   const KIND = { permanent: 'П', long: 'Д', short: 'К' };
-  $('cases').value = input.cases.map((c) => [KIND[c.kind], c.gamma_f, c.psi_long, c.q].join(' ')).join('\n');
+  $('cases').value = input.cases.map((c) => [KIND[c.kind], c.gamma_f, c.psi_long ?? 0, c.q, c.design ? 'р' : ''].join(' ').trim()).join('\n');
   $('points').value = writeRows(input.cases.flatMap((c, i) => c.points.map((x) => [i + 1, x.x, x.y, x.n])));
   $('pile-d').value = p.d; $('pile-l').value = p.length; $('pile-fd').value = p.fd; $('pile-kind').value = p.kind;
   $('pile-concrete').value = p.concrete; $('pile-rebar').value = p.rebar; $('pile-bars').value = p.bars;
@@ -75,6 +75,8 @@ function fill(input) {
   $('s-max').value = Math.round(input.s_max * 100); $('ds-rel').value = input.ds_rel;
   $('acrc-long').value = input.acrc_long; $('acrc-short').value = input.acrc_short; $('punching').checked = input.punching;
   $('existing').value = writeRows(input.existing);
+  state.layout = input.layout || 'rows';
+  for (const x of document.querySelectorAll('#layout button')) x.classList.toggle('current', x.dataset.layout === state.layout);
 }
 
 function collectCases() {
@@ -82,12 +84,14 @@ function collectCases() {
   const lines = $('cases').value.split('\n').map((l) => l.trim()).filter((l) => l);
   const cases = lines.map((l, i) => {
     const [k, ...rest] = l.split(/\s+/);
+    const design = rest.length === 4 && /^[рp]$/i.test(rest[3]);
+    if (design) rest.pop();
     const v = rest.map((x) => Number(x.replace(',', '.')));
     if (!KIND[k.toUpperCase()] || v.length !== 3 || v.some((x) => !Number.isFinite(x))) {
       $('cases').classList.add('invalid');
-      throw new Error(`Загружение ${i + 1}: «вид γf ψдл q», вид — П, Д или К`);
+      throw new Error(`Загружение ${i + 1}: «вид γf ψдл q [р]», вид — П, Д или К`);
     }
-    return { name: `${i + 1}`, kind: KIND[k.toUpperCase()], gamma_f: v[0], psi_long: v[1], q: v[2], points: [] };
+    return { name: `${i + 1}`, kind: KIND[k.toUpperCase()], gamma_f: v[0], psi_long: v[1], q: v[2], design, points: [] };
   });
   if (!cases.length) throw new Error('Задайте хотя бы одно загружение');
   for (const [n, x, y, f] of table('points', 4, 'Сосредоточенные нагрузки')) {
@@ -242,9 +246,33 @@ function render(refit = false) {
   plan.draw(scene, refit);
 }
 
+function checksTable() {
+  const tbody = $('checks').tBodies[0];
+  tbody.replaceChildren();
+  const v = state.result.variants[state.current];
+  if (!v) return;
+  const lim = state.input;
+  const rows = [
+    ['Нагрузка на сваю N/Fd', fmt(v.util_ground, 2), '1,00', v.util_ground <= 1],
+    ['Свая по материалу, Кисп', fmt(v.util_material, 2), '1,00', v.util_material <= 1],
+    ['Продавливание плиты, Кисп', v.util_punch ? fmt(v.util_punch, 2) : 'не проверялось', '1,00', v.util_punch <= 1],
+    ['Осадка, см', fmt(v.s_max * 100, 1), fmt(lim.s_max * 100, 1), v.s_max <= lim.s_max],
+    ['Разность осадок Δs/L', fmt(v.ds_rel, 4), fmt(lim.ds_rel, 4), v.ds_rel <= lim.ds_rel],
+    ['Армирование плиты', v.design_impossible ? 'не подбирается' : `${fmt(v.kg_m3, 1)} кг/м³`, '', !v.design_impossible],
+  ];
+  for (const [name, value, limit, ok] of rows) {
+    const tr = tbody.insertRow();
+    tr.className = ok ? '' : 'fail';
+    for (const [text, cls] of [[name, ''], [value, 'num'], [limit ? `≤ ${limit}` : '', 'num muted']]) {
+      const td = tr.insertCell(); td.textContent = text; td.className = cls;
+    }
+  }
+}
+
 function select(i) {
   state.current = i;
   variantTable();
+  checksTable();
   pileTable();
   render();
   $('export-csv').disabled = $('export-dxf').disabled = $('export-rebar').disabled = i < 0;
@@ -276,6 +304,30 @@ $('run').onclick = async () => {
   } catch (e) {
     status(`Ошибка: ${e.message ?? e}`, true);
   }
+};
+
+$('save-project').onclick = async () => {
+  let input;
+  try { input = collect(); } catch (e) { return status(e.message, true); }
+  const path = await pickFile('project', true);
+  if (!path) return;
+  try { await call('save_project', { path, input }); status(`Проект сохранён: ${path}`); } catch (e) { status(`Ошибка: ${e.message ?? e}`, true); }
+};
+
+$('open-project').onclick = async () => {
+  const path = await pickFile('project');
+  if (!path) return;
+  try {
+    const input = await call('load_project', { path });
+    fill(input);
+    state.result = null; state.current = -1;
+    for (const id of ['export-csv', 'export-dxf', 'export-rebar']) $(id).disabled = true;
+    $('variants').tBodies[0].replaceChildren(); $('piles').tBodies[0].replaceChildren(); $('checks').tBodies[0].replaceChildren();
+    $('variants-note').textContent = ''; $('legend').hidden = true;
+    $('subtitle').textContent = path.split(/[\\/]/).pop();
+    preview();
+    status(`Проект открыт: ${path}`);
+  } catch (e) { status(`Ошибка: ${e.message ?? e}`, true); }
 };
 
 onProgress((stage) => { $('busy-text').textContent = `Расчёт: ${stage}`; status(stage); });
