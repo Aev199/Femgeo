@@ -4,5 +4,6 @@
 
 pub mod fem;
 pub mod geobase;
+pub mod optimize;
 pub mod piles;
 pub mod sp63;
