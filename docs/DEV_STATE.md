@@ -68,8 +68,8 @@
 
 ## Решения за пользователем
 
-- Лицензия topo (ветка `license-gpl3`): Femgeo уже GPL-3.0, Gmsh — GPL;
-  при вшивании Femgeo в topo вся сборка — GPL.
+- Лицензии (решено 2026-11-01): topo — GPL-3.0-or-later (`main` и рабочая
+  ветка, `1dd032c`), Femgeo — GPL-3.0, Gmsh — GPL.
 - Влить `stage1-sp63-plates` в `main` (в `main` только постановка).
 
 ## Среда
