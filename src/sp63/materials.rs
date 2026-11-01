@@ -220,6 +220,16 @@ impl RebarClass {
         }
     }
 
+    /// Rsw поперечной арматуры, кПа (табл. 6.15).
+    pub fn rsw(self) -> f64 {
+        1000.0
+            * match self {
+                RebarClass::A240 => 170.0,
+                RebarClass::A400 => 280.0,
+                RebarClass::A500 => 300.0,
+            }
+    }
+
     pub fn chars(self, calc: CalcType) -> RebarChars {
         let (rs, rsc, rsn) = self.table();
         let k = 1000.0;

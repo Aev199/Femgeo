@@ -13,3 +13,7 @@ src/sp63/capra_maury.rs = CScore/ShellSimpl/CapraMauryDesignSolver.cs, CScore/Sh
 tests/common/mod.rs = CScore.Tests/ShellSimpl/StripNdmFixture.cs
 tests/sp63_strip.rs = CScore.Tests/ShellSimpl/StripNdmSectionTests.cs, CScore.Tests/ShellSimpl/StripNdmSolveTests.cs, CScore.Tests/ShellSimpl/StripNdmUlsTests.cs, CScore.Tests/ShellSimpl/StripNdmUlsTableTests.cs
 tests/sp63_design.rs = CScore.Tests/ShellSimpl/StripNdmDesignTests.cs, CScore.Tests/ShellSimpl/StripNdmSlsTests.cs, CScore.Tests/ShellSimpl/OrthogonalMeshLpTests.cs, CScore.Tests/ShellSimpl/CapraMauryDesignTests.cs, CScore.Tests/ShellSimpl/CapraMauryDesignSlsTests.cs
+src/sp63/plate_shear.rs = CScore/ShellSimpl/PlateShearCheck.cs, CScore/Sp63Shear/PhiNCalculator.cs, CScore/Sp63Shear/ShearFormulas.cs, CScore/Sp63Shear/StirrupResolver.cs
+tests/sp63_shear.rs = CScore.Tests/ShellSimpl/PlateShearCheckTests.cs
+src/sp63/section.rs = CScore/CrossSection.cs, CScore/Diagramm.cs, CScore/LimitSectionStrainSolver.cs, CScore/CrossSectionLimitAdapter.cs
+src/sp63/pile.rs = CScore/LimitForceSolver.cs

@@ -10,5 +10,8 @@ pub mod capra_maury;
 pub mod diagram;
 pub mod materials;
 pub mod mesh_lp;
+pub mod pile;
+pub mod plate_shear;
+pub mod section;
 pub mod strip;
 pub mod strip_design;
