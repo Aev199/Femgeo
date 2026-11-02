@@ -4,7 +4,7 @@ use femgeo::fem::{LoadCase, Model, Shell, ShellMaterial, SpringGroup};
 use femgeo::piles::{interaction, Field, Layer, Pile, SinglePile, SoilColumn};
 
 fn soil() -> SoilColumn {
-    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3 }, Layer { bottom: -40.0, e: 40_000.0, nu: 0.3 }] }
+    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -40.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] }
 }
 
 fn pile(x: f64, y: f64) -> Pile {
@@ -148,7 +148,7 @@ fn layout_invariance() {
 /// Короткая свая на слабодеформируемом основании (κ < 7,5): (7.38) и таблица 7.18.
 #[test]
 fn short_pile_formula() {
-    let soil = SoilColumn { top: 0.0, layers: vec![Layer { bottom: -7.0, e: 20_000.0, nu: 0.3 }, Layer { bottom: -60.0, e: 300_000.0, nu: 0.3 }] };
+    let soil = SoilColumn { top: 0.0, layers: vec![Layer { bottom: -7.0, e: 20_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -60.0, e: 300_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] };
     let d: f64 = 0.6;
     let p = Pile { x: 0.0, y: 0.0, head: -1.0, length: 6.0, d, ea: 3e7 * std::f64::consts::PI * d * d / 4.0 };
     let sp = SinglePile::new(&p, &soil);

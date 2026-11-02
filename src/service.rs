@@ -115,9 +115,13 @@ pub struct Input {
     /// Существующие сваи (X, Y) — ориентир.
     #[serde(default)]
     pub existing: Vec<[f64; 2]>,
-    /// Предельное сопротивление сваи для нелинейной работы в грунте, кН (None — линейно).
+    /// Предел сваи Fu, кН: сваи с N > Fu держат Fu (None — без предела).
     #[serde(default)]
     pub pile_fu: Option<f64>,
+    /// Жёсткость свай: "sp24" — взаимовлияние по СП 24, п. 7.4 (по умолчанию);
+    /// "conditional" — одинаковая, по осадке условного фундамента (нужны γ и φ слоёв).
+    #[serde(default = "sp24")]
+    pub pile_model: String,
 }
 
 fn acrc_long() -> f64 {
@@ -128,6 +132,10 @@ fn acrc_short() -> f64 {
 }
 fn yes() -> bool {
     true
+}
+
+fn sp24() -> String {
+    "sp24".into()
 }
 
 fn rows() -> String {
@@ -181,7 +189,7 @@ fn rebar(name: &str) -> Result<RebarClass, String> {
 
 impl Serialize for Layer {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        json!({ "bottom": self.bottom, "e": self.e, "nu": self.nu }).serialize(s)
+        json!({ "bottom": self.bottom, "e": self.e, "nu": self.nu, "gamma": self.gamma, "phi": self.phi }).serialize(s)
     }
 }
 
@@ -192,9 +200,13 @@ impl<'de> Deserialize<'de> for Layer {
             bottom: f64,
             e: f64,
             nu: f64,
+            #[serde(default)]
+            gamma: f64,
+            #[serde(default)]
+            phi: f64,
         }
         let l = L::deserialize(d)?;
-        Ok(Layer { bottom: l.bottom, e: l.e, nu: l.nu })
+        Ok(Layer { bottom: l.bottom, e: l.e, nu: l.nu, gamma: l.gamma, phi: l.phi })
     }
 }
 
@@ -475,6 +487,17 @@ impl Service {
         let (crack_long, crack_short) = (crack(input.acrc_long), crack(input.acrc_short));
         let soil = self.soil_fn(&input.soil)?;
         let region = input.region.clone().unwrap_or(Region { outer: r.outline.clone(), holes: r.holes.clone() });
+        // Жёсткость свай по условному фундаменту: контур — контур плиты (сваи у края; допущение),
+        // грунт — в центре контура.
+        let conditional = match input.pile_model.as_str() {
+            "conditional" => {
+                let n = r.outline.len() as f64;
+                let c = r.outline.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n]);
+                Some(crate::optimize::ConditionalModel { outline: r.outline.clone(), column: soil(c[0], c[1]) })
+            }
+            "sp24" => None,
+            m => return Err(format!("неизвестная модель свай «{m}»")),
+        };
         let problem = Problem {
             raft: raft.clone(),
             pile_head: r.z_bottom,
@@ -502,6 +525,7 @@ impl Service {
             punching: input.punching.then(|| Punching { rbt: c_uls.rbt, h0: r.h - r.cover, raft: Region { outer: r.outline.clone(), holes: r.holes.clone() } }),
             existing: input.existing.clone(),
             pile_fu: input.pile_fu,
+            conditional,
             cache: Default::default(),
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
@@ -597,7 +621,8 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bo
             "ds_rel": v.ds_rel,
             "feasible": v.feasible,
             "design_impossible": v.design_impossible,
-            "converged": v.converged,
+            "capped": v.capped,
+            "conditional": v.conditional.as_ref().map(|c| json!({ "s": c.s, "p": c.p, "area": c.area, "phi_mt": c.phi_mt, "hc": c.hc })),
             "piles": v.piles.iter().zip(&v.pile_n).map(|(&n, &f)| json!({ "x": raft.nodes[n][0], "y": raft.nodes[n][1], "n": f })).collect::<Vec<_>>(),
             // см²/м
             "rebar": v.rebar.iter().map(|a| a.map(|x| x * 1e4)).collect::<Vec<_>>(),
@@ -668,7 +693,7 @@ pub fn default_input() -> Input {
         region: None,
         soil: SoilInput::Layers {
             top: 0.0,
-            layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3 }],
+            layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }],
         },
         s_max: 0.15,
         ds_rel: 0.002,
@@ -678,6 +703,7 @@ pub fn default_input() -> Input {
         punching: true,
         existing: vec![],
         pile_fu: None,
+        pile_model: sp24(),
     }
 }
 

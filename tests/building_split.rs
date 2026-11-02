@@ -85,9 +85,9 @@ fn run_on_building_mesh() {
     assert_eq!(out["holes"].as_array().unwrap().len(), 1);
 }
 
-/// Нелинейная работа свай (Fu): пик нагрузки на сваю снижается, итерации сходятся.
+/// Предел Fu: сваи не больше Fu, сумма сохраняется; условный фундамент — одинаковая жёсткость.
 #[test]
-fn nonlinear_piles_redistribute() {
+fn pile_cap_and_conditional() {
     use femgeo::service::{default_input, Service};
     let mut m = Mesh::default();
     m.raft = grid(&mut m, 0.0, 0.8, false);
@@ -99,18 +99,27 @@ fn nonlinear_piles_redistribute() {
             m.piles.push(([1.0 + 2.0 * i as f64, 1.0 + 2.0 * j as f64, 0.0], [0.0; 6]));
         }
     }
-    let run = |fu: Option<f64>| {
+    let run = |fu: Option<f64>, model: &str| {
         let mut input = default_input();
         input.pile.fd = 1e5;
         input.pile_fu = fu;
+        input.pile_model = model.into();
+        if let femgeo::service::SoilInput::Layers { layers, .. } = &mut input.soil {
+            layers.iter_mut().for_each(|l| { l.gamma = 19.0; l.phi = 22.0; });
+        }
         let out = Service::new().run_mesh(input, &m, &mut |_| {}).unwrap();
         let v = out["variants"][0].clone();
-        assert!(v["reference"].as_bool().unwrap() && v["converged"].as_bool().unwrap(), "{fu:?} {} {} {}", v["reference"], v["converged"], v["count"]);
+        assert!(v["reference"].as_bool().unwrap());
         let n: Vec<f64> = v["piles"].as_array().unwrap().iter().map(|p| p["n"].as_f64().unwrap()).collect();
-        (n.iter().cloned().fold(0.0, f64::max), n.iter().sum::<f64>())
+        (n.iter().cloned().fold(0.0, f64::max), n.iter().sum::<f64>(), v)
     };
-    let (lin_max, lin_sum) = run(None);
-    let (nl_max, nl_sum) = run(Some(700.0));
-    assert!(nl_max < 0.95 * lin_max, "{nl_max} {lin_max}");
-    assert!((nl_sum / lin_sum - 1.0).abs() < 0.02, "{nl_sum} {lin_sum}");
+    let (lin_max, lin_sum, _) = run(None, "sp24");
+    let fu = 0.5 * (lin_max + lin_sum / 25.0);
+    let (cap_max, cap_sum, v) = run(Some(fu), "sp24");
+    assert!(v["capped"].as_bool().unwrap());
+    assert!(cap_max <= fu * (1.0 + 1e-6) && cap_max > 0.99 * fu, "{cap_max} {fu}");
+    assert!((cap_sum / lin_sum - 1.0).abs() < 0.02, "{cap_sum} {lin_sum}");
+    let (_, cond_sum, v) = run(None, "conditional");
+    assert!(v["conditional"]["s"].as_f64().unwrap() > 0.0);
+    assert!((cond_sum / lin_sum - 1.0).abs() < 0.02);
 }

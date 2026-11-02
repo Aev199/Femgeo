@@ -72,10 +72,13 @@ pub struct Problem<'a> {
     /// Существующие сваи (ориентир, не правило): старт свободного режима и предпочтение
     /// позиций рядом с ними.
     pub existing: Vec<[f64; 2]>,
-    /// Нелинейная работа сваи в грунте (кН): собственная податливость сваи — f / (1 − N/Fu),
-    /// секущие жёсткости по определяющему сочетанию ПС1 (наибольшая сумма нагрузок на сваи),
-    /// затем все сочетания — с ними линейно. None — линейная постановка.
+    /// Предел сваи Fu, кН: в каждом сочетании сваи с N > Fu держат постоянную силу Fu,
+    /// избыток перераспределяется (активное множество). None — без предела.
     pub pile_fu: Option<f64>,
+    /// Жёсткость свай по осадке условного фундамента (`piles::conditional`): одинаковая
+    /// k = N / (n·s), N — наибольшая суммарная нагрузка длительного сочетания ПС2 (иначе
+    /// полных ПС2). None — взаимовлияние по СП 24, п. 7.4.
+    pub conditional: Option<ConditionalModel>,
     /// Подготовка расчёта (заполняется при первой оценке): `Default::default()`.
     pub cache: OnceCell<Prepared>,
 }
@@ -129,9 +132,18 @@ pub struct Evaluation {
     pub shift: f64,
     /// Подбор невозможен хотя бы в одном элементе.
     pub design_impossible: bool,
-    /// Итерации нелинейной работы свай сошлись (в линейной постановке — всегда).
-    pub converged: bool,
+    /// Хотя бы в одном сочетании сваи ограничены пределом Fu.
+    pub capped: bool,
+    /// Условный фундамент (если жёсткость свай по нему).
+    pub conditional: Option<crate::piles::conditional::Conditional>,
     pub feasible: bool,
+}
+
+/// Исходные данные условного фундамента: контур по наружным граням свай и грунт в его центре.
+#[derive(Clone, Debug)]
+pub struct ConditionalModel {
+    pub outline: Vec<[f64; 2]>,
+    pub column: crate::piles::SoilColumn,
 }
 
 impl Evaluation {
@@ -180,53 +192,44 @@ impl Problem<'_> {
                 Pile { x, y, head: self.pile_head, length: self.pile.length, d: self.pile.d, ea: self.pile.ea }
             })
             .collect();
-        let field = Field::new(&ps, self.soil);
+        let field = if self.conditional.is_some() { None } else { Some(Field::new(&ps, self.soil)) };
         let p = self.prepared()?;
         let m = &self.raft;
         let np = piles.len();
         let idx: Vec<usize> = piles.iter().map(|n| p.index.get(n).copied().ok_or("свая не в допустимой позиции")).collect::<Result<_, _>>()?;
         let at = |v: &[f64], node: usize| v[6 * p.pos[&node] + 2];
         // A = F + G_SS (м/кН), симметричная положительно определённая.
-        let mut a = field.flexibility.clone();
+        let mut gss = vec![0.0; np * np];
         for i in 0..np {
             for j in 0..np {
-                a[i * np + j] += 0.5 * (at(&p.g[idx[j]], piles[i]) + at(&p.g[idx[i]], piles[j]));
+                gss[i * np + j] = 0.5 * (at(&p.g[idx[j]], piles[i]) + at(&p.g[idx[i]], piles[j]));
             }
         }
-        let mut converged = true;
-        if let Some(fu) = self.pile_fu {
-            let base = a.clone();
-            let w0: Vec<Vec<f64>> = p.u0.iter().map(|u0| piles.iter().map(|&n| at(u0, n)).collect()).collect();
-            let forces = |a: &[f64], c: &[f64]| -> Result<Vec<f64>, String> {
-                let ch = cholesky(a, np)?;
-                let w: Vec<f64> = (0..np).map(|i| c.iter().zip(&w0).map(|(f, w)| f * w[i]).sum()).collect();
-                Ok(chol_solve(&ch, np, &w).into_iter().map(|t| -t).collect())
-            };
-            let mut reference: (f64, Vec<f64>) = (f64::NEG_INFINITY, vec![]);
-            for c in &self.uls {
-                let total: f64 = forces(&a, c)?.iter().sum();
-                if total > reference.0 {
-                    reference = (total, c.clone());
-                }
+        let w0: Vec<Vec<f64>> = p.u0.iter().map(|u0| piles.iter().map(|&n| at(u0, n)).collect()).collect();
+        let mut conditional = None;
+        let a: Vec<f64> = match (&field, &self.conditional) {
+            (Some(f), _) => f.flexibility.iter().zip(&gss).map(|(x, y)| x + y).collect(),
+            (None, Some(cm)) => {
+                // Суммарные нагрузки загружений — из равновесия при любой одинаковой жёсткости.
+                let probe = 1e-5;
+                let mut a = gss.clone();
+                (0..np).for_each(|i| a[i * np + i] += probe);
+                let ch = cholesky(&a, np)?;
+                let totals: Vec<f64> = w0.iter().map(|w| -chol_solve(&ch, np, w).iter().sum::<f64>()).collect();
+                let combos: &[Vec<f64>] = match &self.sls_long {
+                    Some(c) => std::slice::from_ref(c),
+                    None => &self.sls,
+                };
+                let n_sls = combos.iter().map(|c| c.iter().zip(&totals).map(|(f, t)| f * t).sum::<f64>()).fold(0.0, f64::max);
+                let cf = crate::piles::conditional::settlement(&cm.column, &cm.outline, self.pile_head, self.pile.length, n_sls)?;
+                let flex = cf.s * np as f64 / n_sls.max(1e-9);
+                conditional = Some(cf);
+                let mut a = gss.clone();
+                (0..np).for_each(|i| a[i * np + i] += flex);
+                a
             }
-            let mut n = forces(&a, &reference.1)?;
-            converged = false;
-            for _ in 0..100 {
-                let mut a2 = base.clone();
-                for i in 0..np {
-                    let q = (n[i] / fu).clamp(0.0, 0.95);
-                    a2[i * np + i] += field.flexibility[i * np + i] * (1.0 / (1.0 - q) - 1.0);
-                }
-                let n2 = forces(&a2, &reference.1)?;
-                let change = n2.iter().zip(&n).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
-                n = n.iter().zip(&n2).map(|(x, y)| 0.5 * (x + y)).collect();
-                a = a2;
-                if change < 1e-3 * fu {
-                    converged = true;
-                    break;
-                }
-            }
-        }
+            (None, None) => unreachable!(),
+        };
         let chol = cholesky(&a, np)?;
         let mut u_cases = Vec::with_capacity(self.cases.len());
         let mut t_cases = Vec::with_capacity(self.cases.len());
@@ -261,8 +264,57 @@ impl Problem<'_> {
             }
             global(&u)
         };
-        let pile_force = |c: &[f64]| -> Vec<f64> {
-            (0..np).map(|i| -c.iter().zip(&t_cases).map(|(f, t)| f * t[i]).sum::<f64>()).collect()
+        // Сочетание: перемещения плиты и нагрузки на сваи (сжатие > 0); при пределе Fu сваи с
+        // N > Fu держат Fu, остальные — из совместности (активное множество, только добавление).
+        let mut capped_any = false;
+        let mut overloaded = false;
+        let mut solve = |c: &[f64]| -> Result<(Vec<f64>, Vec<f64>), String> {
+            let t_lin: Vec<f64> = (0..np).map(|i| c.iter().zip(&t_cases).map(|(f, t)| f * t[i]).sum::<f64>()).collect();
+            let mut u = combine(c);
+            let Some(fu) = self.pile_fu else { return Ok((u, t_lin.iter().map(|t| -t).collect())) };
+            let mut t = t_lin.clone();
+            let mut capped = vec![false; np];
+            loop {
+                let over: Vec<usize> = (0..np).filter(|&i| !capped[i] && -t[i] > fu * (1.0 + 1e-9)).collect();
+                if over.is_empty() {
+                    break;
+                }
+                over.iter().for_each(|&i| capped[i] = true);
+                let free: Vec<usize> = (0..np).filter(|&i| !capped[i]).collect();
+                if free.is_empty() {
+                    // Сваи не держат нагрузку даже на пределе: вариант недопустим, нагрузки — линейно.
+                    overloaded = true;
+                    return Ok((u, t_lin.iter().map(|t| -t).collect()));
+                }
+                let w: Vec<f64> = (0..np).map(|i| c.iter().zip(&w0).map(|(f, w)| f * w[i]).sum()).collect();
+                let nf = free.len();
+                let mut aff = vec![0.0; nf * nf];
+                let mut rhs = vec![0.0; nf];
+                for (x, &i) in free.iter().enumerate() {
+                    rhs[x] = w[i] + (0..np).filter(|&j| capped[j]).map(|j| a[i * np + j] * fu).sum::<f64>();
+                    for (y, &j) in free.iter().enumerate() {
+                        aff[x * nf + y] = a[i * np + j];
+                    }
+                }
+                let tf = chol_solve(&cholesky(&aff, nf)?, nf, &rhs);
+                (0..np).filter(|&j| capped[j]).for_each(|j| t[j] = -fu);
+                free.iter().zip(&tf).for_each(|(&i, &v)| t[i] = v);
+            }
+            if capped.iter().any(|&x| x) {
+                capped_any = true;
+                let mut du = vec![0.0; 6 * p.nodes.len()];
+                for j in 0..np {
+                    let dt = t[j] - t_lin[j];
+                    if dt != 0.0 {
+                        for (x, gx) in du.iter_mut().zip(&p.g[idx[j]]) {
+                            *x -= dt * gx;
+                        }
+                    }
+                }
+                let dg = global(&du);
+                u.iter_mut().zip(&dg).for_each(|(x, d)| *x += d);
+            }
+            Ok((u, t.iter().map(|x| -x).collect()))
         };
         let mut pile_n = vec![0.0f64; np];
         let mut s_max: f64 = 0.0;
@@ -294,8 +346,8 @@ impl Problem<'_> {
         };
         // ПС1: нагрузки на сваи (R = −K·w, сжатие — положительное) и армирование.
         for c in &self.uls {
-            let u = combine(c);
-            for (i, r) in pile_force(c).into_iter().enumerate() {
+            let (u, n) = solve(c)?;
+            for (i, r) in n.into_iter().enumerate() {
                 pile_n[i] = pile_n[i].max(r);
             }
             if design {
@@ -305,7 +357,7 @@ impl Problem<'_> {
         // ПС2: осадки и разность осадок; непродолжительное раскрытие трещин.
         let settle = if self.sls.is_empty() { &self.uls } else { &self.sls };
         for c in settle {
-            let u = combine(c);
+            let (u, _) = solve(c)?;
             let w: Vec<f64> = piles.iter().map(|&n| u[6 * n + 2]).collect();
             let s_lc = w.iter().map(|x| -x).fold(0.0, f64::max);
             if s_lc >= s_max {
@@ -327,7 +379,7 @@ impl Problem<'_> {
         }
         if design {
             if let (Some(ctx), Some(c)) = (self.crack_long, &self.sls_long) {
-                let d = crack_designs(ctx, &forces_of(&combine(c)), &env);
+                let d = crack_designs(ctx, &forces_of(&solve(c)?.0), &env);
                 add_some(&d, &mut env, &mut impossible);
             }
         }
@@ -382,10 +434,11 @@ impl Problem<'_> {
             rebar: env,
             w_nodes,
             design_impossible: impossible,
-            converged,
+            capped: capped_any,
+            conditional,
             feasible: false,
         };
-        ev.feasible = !impossible && converged && ev.worst(&self.limits) <= 1.0;
+        ev.feasible = !impossible && !overloaded && ev.worst(&self.limits) <= 1.0;
         Ok(ev)
     }
 

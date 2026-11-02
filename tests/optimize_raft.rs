@@ -35,7 +35,7 @@ fn raft() -> Model {
 }
 
 fn soil(_: f64, _: f64) -> SoilColumn {
-    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3 }] }
+    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] }
 }
 
 fn material_util_per_kn(d: f64, l0: f64) -> f64 {
@@ -78,6 +78,7 @@ fn run_with(building: Option<&femgeo::fem::condense::Building>, n: usize) -> (Ve
         punching: None,
         existing: vec![],
         pile_fu: None,
+        conditional: None,
         cache: Default::default(),
     };
     if n == usize::MAX {
