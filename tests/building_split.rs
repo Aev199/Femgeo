@@ -139,7 +139,7 @@ fn structures_detected() {
     m.nodes.push([5.0, 8.0, 3.0]);
     m.beams.push(Beam { n1: 8 * 11 + 5, n2: top, e: 3e7, g: 1.25e7, a: 0.24, iy: 0.4 * 0.216 / 12.0, iz: 0.6 * 0.064 / 12.0, j: 1e-3, ref_dir: None });
     // Стена: (2,2) → (6,2) → (6,6), пластины 1 × 3 м, t = 0,2.
-    let mut wall = |a: [usize; 2], b: [usize; 2], m: &mut Mesh| {
+    let wall = |a: [usize; 2], b: [usize; 2], m: &mut Mesh| {
         let (na, nb) = (a[1] * 11 + a[0], b[1] * 11 + b[0]);
         let (ta, tb) = (m.nodes.len(), m.nodes.len() + 1);
         m.nodes.push([a[0] as f64, a[1] as f64, 3.0]);

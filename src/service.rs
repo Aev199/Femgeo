@@ -518,26 +518,52 @@ impl Service {
                             (0..k).map(move |j| { let t = (j as f64 + 0.5) / k as f64; [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])] })
                         }).collect()
                     };
+                    // Контур из отрезков (начало, конец, наружная нормаль) — для торцов и углов стен.
+                    let mut segs: Vec<([f64; 2], [f64; 2], [f64; 2])> = vec![];
                     let (kind, u, inside) = match st.kind {
                         crate::building::StructureKind::Column { b, h } => {
                             let (hx, hy) = ((b + h0) / 2.0, (h + h0) / 2.0);
                             ("column", 2.0 * (b + h) + 4.0 * h0, rect(c[0] - hx, c[0] + hx, c[1] - hy, c[1] + hy))
                         }
                         crate::building::StructureKind::WallEnd { t, dir } => {
-                            let a = crate::building::WALL_PART_H0 * h0;
+                            // СП 430, п. 6.3.8: участок у торца на h0/2 и два вдоль стены той же длины t + h0.
+                            let l = t + h0;
                             let nrm = [-dir[1], dir[0]];
-                            let w = (t + h0) / 2.0;
+                            let w = l / 2.0;
                             let q = |s: f64, n: f64| [c[0] + s * dir[0] + n * nrm[0], c[1] + s * dir[1] + n * nrm[1]];
-                            ("wall_end", (t + h0) + 2.0 * (a + h0 / 2.0), vec![q(-h0 / 2.0, -w), q(a, -w), q(a, w), q(-h0 / 2.0, w)])
+                            let (s0, s1) = (-h0 / 2.0, -h0 / 2.0 + l);
+                            segs.push((q(s0, -w), q(s0, w), [-dir[0], -dir[1]]));
+                            segs.push((q(s0, w), q(s1, w), nrm));
+                            segs.push((q(s0, -w), q(s1, -w), [-nrm[0], -nrm[1]]));
+                            ("wall_end", 3.0 * l, vec![q(s0, -w), q(s1, -w), q(s1, w), q(s0, w)])
                         }
                         crate::building::StructureKind::WallCorner { t } => {
-                            let a = crate::building::WALL_PART_H0 * h0;
-                            let e = a + t / 2.0 + h0 / 2.0;
-                            ("wall_corner", 2.0 * e + 2.0 * (a - t / 2.0 - h0 / 2.0).max(0.0), rect(c[0] - e, c[0] + e, c[1] - e, c[1] + e))
+                            // Угол: два наружных участка по t + h0 вдоль ветвей (допущение до сверки с рис. 6.2
+                            // СП 430); направление «наружу» — от центра тяжести узлов угла.
+                            let l = t + h0;
+                            let g = st.nodes.iter().fold([0.0, 0.0], |a, &k| [a[0] + s.raft.nodes[k][0] / st.nodes.len() as f64, a[1] + s.raft.nodes[k][1] / st.nodes.len() as f64]);
+                            let out = [c[0] - g[0], c[1] - g[1]];
+                            let sx = if out[0] >= 0.0 { 1.0 } else { -1.0 };
+                            let sy = if out[1] >= 0.0 { 1.0 } else { -1.0 };
+                            let o = [c[0] + sx * l / 2.0, c[1] + sy * l / 2.0];
+                            segs.push((o, [o[0] - sx * l, o[1]], [0.0, sy]));
+                            segs.push((o, [o[0], o[1] - sy * l], [sx, 0.0]));
+                            ("wall_corner", 2.0 * l, rect(c[0] - l / 2.0, c[0] + l / 2.0, c[1] - l / 2.0, c[1] + l / 2.0))
                         }
                     };
                     let samples = along(inside.clone(), 18);
-                    crate::optimize::PunchArea { kind: kind.into(), at: c, nodes, u, samples, inside: Region { outer: inside, holes: vec![] } }
+                    // Точки контура в элементах плиты (вне плиты — не учитываются).
+                    let shear = (!segs.is_empty()).then(|| {
+                        let k = 12;
+                        segs.iter()
+                            .flat_map(|&(a, b, nrm)| {
+                                let ds = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / k as f64;
+                                (0..k).map(move |j| { let t = (j as f64 + 0.5) / k as f64; ([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], nrm, ds) })
+                            })
+                            .filter_map(|(p, nrm, ds)| element_at(&raft, p).map(|e| (e, nrm, ds)))
+                            .collect()
+                    });
+                    crate::optimize::PunchArea { kind: kind.into(), at: c, nodes, u, samples, inside: Region { outer: inside, holes: vec![] }, shear }
                 })
                 .collect(),
             _ => vec![],
@@ -643,6 +669,15 @@ impl Service {
         std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
         Ok(json!({ "path": path }))
     }
+}
+
+/// Элемент плиты, в плане содержащий точку (регулярная сетка: по габариту элемента).
+fn element_at(m: &Model, p: [f64; 2]) -> Option<usize> {
+    m.shells.iter().position(|s| {
+        let (x0, x1) = s.nodes.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, &n| (a.0.min(m.nodes[n][0]), a.1.max(m.nodes[n][0])));
+        let (y0, y1) = s.nodes.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, &n| (a.0.min(m.nodes[n][1]), a.1.max(m.nodes[n][1])));
+        p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1
+    })
 }
 
 fn polygon_area(p: &[[f64; 2]]) -> f64 {

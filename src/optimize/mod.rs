@@ -168,6 +168,9 @@ pub struct PunchArea {
     pub samples: Vec<[f64; 2]>,
     /// Область внутри контура: сваи с центром в ней разгружают продавливание.
     pub inside: Region,
+    /// Торцы и углы стен (СП 430.1325800.2018, п. 6.3.8): сила — равнодействующая поперечных
+    /// сил плиты по контуру: точки контура (элемент плиты, нормаль в плане, длина участка).
+    pub shear: Option<Vec<(usize, [f64; 2], f64)>>,
 }
 
 /// Оценка варианта.
@@ -439,15 +442,34 @@ impl Problem<'_> {
             let (u, n) = solve(c)?;
             if let (Some(pp), false) = (&self.punching, self.structure_punch.is_empty()) {
                 let down = building_down(c, &u);
+                let mut q_of: HashMap<usize, [f64; 2]> = HashMap::new();
                 for a in &self.structure_punch {
-                    let f: f64 = a.nodes.iter().map(|k| down.get(k).copied().unwrap_or(0.0)).sum();
-                    let relief: f64 = piles.iter().zip(&n).filter(|(&q, _)| a.inside.contains(self.xy(q))).map(|(_, &x)| x).sum();
-                    let frac = a.samples.iter().filter(|&&q| pp.raft.contains(q)).count() as f64 / a.samples.len().max(1) as f64;
-                    let cap = pp.rbt * a.u * frac.max(1e-9) * pp.h0;
-                    let util = (f - relief).max(0.0) / cap;
+                    let (f, cap) = if let Some(sh) = &a.shear {
+                        // Равнодействующая поперечных сил по контуру (глобальные оси плана).
+                        let mut sum = 0.0;
+                        let mut len = 0.0;
+                        for &(e, nrm, ds) in sh {
+                            let q = *q_of.entry(e).or_insert_with(|| {
+                                let el = &m.shells[e];
+                                let cc: Vec<V3> = el.nodes.iter().map(|&k| m.nodes[k]).collect();
+                                let ue: Vec<f64> = el.nodes.iter().flat_map(|&k| u[6 * k..6 * k + 6].to_vec()).collect();
+                                let (r, f) = fem::shell::forces(&cc, &el.mat, &ue).expect("элемент проверен при сборке");
+                                [f[6] * r[0][0] + f[7] * r[1][0], f[6] * r[0][1] + f[7] * r[1][1]]
+                            });
+                            sum += (q[0] * nrm[0] + q[1] * nrm[1]) * ds;
+                            len += ds;
+                        }
+                        (sum.abs(), pp.rbt * len.max(1e-9) * pp.h0)
+                    } else {
+                        let f: f64 = a.nodes.iter().map(|k| down.get(k).copied().unwrap_or(0.0)).sum();
+                        let relief: f64 = piles.iter().zip(&n).filter(|(&q, _)| a.inside.contains(self.xy(q))).map(|(_, &x)| x).sum();
+                        let frac = a.samples.iter().filter(|&&q| pp.raft.contains(q)).count() as f64 / a.samples.len().max(1) as f64;
+                        (f - relief, pp.rbt * a.u * frac.max(1e-9) * pp.h0)
+                    };
+                    let util = f.max(0.0) / cap;
                     if util > util_punch_struct {
                         util_punch_struct = util;
-                        punch_struct_worst = Some((a.kind.clone(), a.at, f - relief, cap));
+                        punch_struct_worst = Some((a.kind.clone(), a.at, f, cap));
                     }
                 }
             }
