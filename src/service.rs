@@ -548,6 +548,11 @@ impl Service {
         let mut out = result_json(&raft, &variants, &input, has_reference);
         if let Some(s) = &split {
             out["notes"] = json!(s.notes);
+            // Вертикальные конструкции: узлы сопряжения здания с плитой (X, Y).
+            let mut st: Vec<[f64; 2]> = s.building.as_ref().map_or(vec![], |b| b.block.dofs.iter().step_by(3).map(|d| { let p = s.raft.nodes[d / 6]; [p[0], p[1]] }).collect());
+            st.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+            st.dedup();
+            out["structures"] = json!(st);
         }
         self.last = Some((input, raft, variants));
         self.last_reference = has_reference;
