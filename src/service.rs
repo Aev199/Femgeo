@@ -674,3 +674,64 @@ pub fn default_input() -> Input {
         existing: vec![],
     }
 }
+
+impl Service {
+    /// Сверка с расчётом исходной модели (ЛИРА): плита на регулярной сетке со зданием
+    /// суперэлементом и сваями-пружинами `mesh.piles` (жёсткость Rz КЭ 56) в ближайших узлах.
+    /// `combos` — коэффициенты к загружениям сетки (как они заданы, без γf). Для каждой сваи —
+    /// Rz (кН, сжатие < 0, как в ЛИРА) по сочетаниям и смещение до узла; для плиты — наибольшая
+    /// и наименьшая вертикальная осадка (м, вниз < 0). Грунт и правила СП 24 не участвуют.
+    pub fn verify_mesh(&mut self, mut input: Input, mesh: &crate::building::Mesh, combos: &[Vec<f64>]) -> Result<Value, String> {
+        let s = crate::building::split(mesh)?;
+        if combos.iter().any(|c| c.len() != mesh.cases.len()) {
+            return Err(format!("сочетание: нужно {} коэффициентов", mesh.cases.len()));
+        }
+        input.raft.outline = s.region.outer.clone();
+        input.raft.holes = s.region.holes.clone();
+        input.raft.h = s.h;
+        let eb = concrete(&input.raft.concrete)?.chars(CalcType::Uls).eb;
+        let mut m = raft_model(&input.raft, eb)?;
+        let nearest = |p: [f64; 3], m: &Model| (0..m.nodes.len()).min_by(|&a, &b| dist2(m.nodes[a], p).total_cmp(&dist2(m.nodes[b], p))).unwrap();
+        let to_grid: Vec<usize> = s.raft.nodes.iter().map(|&p| nearest(p, &m)).collect();
+        let mut loads: Vec<LoadCase> = s.raft_cases.iter().map(|lc| LoadCase { nodal: lc.nodal.iter().map(|&(n, f)| (to_grid[n], f)).collect(), pressure: vec![] }).collect();
+        if let Some(b) = &s.building {
+            m.blocks.push(crate::fem::DenseBlock { dofs: b.block.dofs.iter().map(|&d| 6 * to_grid[d / 6] + d % 6).collect(), k: b.block.k.clone() });
+            for &d in b.block.dofs.iter().step_by(3) {
+                m.fixed.push((to_grid[d / 6], [true, true, false, false, false, true]));
+            }
+            for (lc, l) in loads.iter_mut().zip(&b.loads) {
+                lc.nodal.extend(l.iter().map(|&(n, f)| (to_grid[n], f)));
+            }
+        }
+        let piles: Vec<(usize, f64, f64)> = mesh
+            .piles
+            .iter()
+            .map(|(p, k)| {
+                let n = nearest([p[0], p[1], 0.0], &m);
+                (n, k[2], dist2(m.nodes[n], [p[0], p[1], 0.0]).sqrt())
+            })
+            .collect();
+        for &(n, k, _) in &piles {
+            m.springs.push(crate::fem::Spring { node: n, k: [0.0, 0.0, k, 0.0, 0.0, 0.0] });
+        }
+        let lin = m.factorize()?;
+        let fs: Vec<Vec<f64>> = loads.iter().map(|lc| m.load_vector(lc)).collect::<Result<_, _>>()?;
+        let us = lin.solve_many(&fs);
+        let mut rz = vec![vec![0.0; combos.len()]; piles.len()];
+        let mut w = vec![];
+        for (c, f) in combos.iter().enumerate() {
+            let u: Vec<f64> = (0..us[0].len()).map(|i| f.iter().zip(&us).map(|(k, u)| k * u[i]).sum()).collect();
+            for (i, &(n, k, _)) in piles.iter().enumerate() {
+                rz[i][c] = k * u[6 * n + 2];
+            }
+            let ws: Vec<f64> = (0..m.nodes.len()).map(|n| u[6 * n + 2]).collect();
+            w.push(json!({ "min": ws.iter().cloned().fold(f64::INFINITY, f64::min), "max": ws.iter().cloned().fold(f64::NEG_INFINITY, f64::max) }));
+        }
+        Ok(json!({
+            "piles": piles.iter().zip(&rz).map(|(p, r)| json!({ "node": p.0, "snap": p.2, "rz": r })).collect::<Vec<_>>(),
+            "settlement": w,
+            "notes": s.notes,
+            "raft": { "area": polygon_area(&s.region.outer) - s.region.holes.iter().map(|h| polygon_area(h)).sum::<f64>(), "h": s.h, "z": s.z_mid, "holes": s.region.holes.len() },
+        }))
+    }
+}
