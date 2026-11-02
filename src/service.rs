@@ -663,6 +663,7 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bo
             "reference": has_reference && i == 0,
             "util_punch": v.util_punch,
             "util_punch_struct": v.util_punch_struct,
+            "punch_struct_worst": v.punch_struct_worst.as_ref().map(|w| json!({ "kind": w.0, "x": w.1[0], "y": w.1[1], "f": w.2, "cap": w.3 })),
             "shift": if v.shift.is_finite() { json!(v.shift) } else { Value::Null },
             "count": v.piles.len(),
             "kg_m3": v.kg_m3,

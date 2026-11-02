@@ -191,6 +191,8 @@ pub struct Evaluation {
     pub util_punch: f64,
     /// Наибольший Кисп продавливания плиты колоннами, торцами и углами стен (0 — не проверялось).
     pub util_punch_struct: f64,
+    /// Определяющая конструкция: вид, точка, сила F (кН, за вычетом свай), предел Rbt·u·h0 (кН).
+    pub punch_struct_worst: Option<(String, [f64; 2], f64, f64)>,
     /// Среднее расстояние от свай до ближайшей существующей сваи, м (NaN — ориентира нет).
     pub shift: f64,
     /// Подбор невозможен хотя бы в одном элементе.
@@ -432,6 +434,7 @@ impl Problem<'_> {
             out
         };
         let mut util_punch_struct: f64 = 0.0;
+        let mut punch_struct_worst = None;
         for c in &self.uls {
             let (u, n) = solve(c)?;
             if let (Some(pp), false) = (&self.punching, self.structure_punch.is_empty()) {
@@ -440,8 +443,12 @@ impl Problem<'_> {
                     let f: f64 = a.nodes.iter().map(|k| down.get(k).copied().unwrap_or(0.0)).sum();
                     let relief: f64 = piles.iter().zip(&n).filter(|(&q, _)| a.inside.contains(self.xy(q))).map(|(_, &x)| x).sum();
                     let frac = a.samples.iter().filter(|&&q| pp.raft.contains(q)).count() as f64 / a.samples.len().max(1) as f64;
-                    let util = (f - relief).max(0.0) / (pp.rbt * a.u * frac.max(1e-9) * pp.h0);
-                    util_punch_struct = util_punch_struct.max(util);
+                    let cap = pp.rbt * a.u * frac.max(1e-9) * pp.h0;
+                    let util = (f - relief).max(0.0) / cap;
+                    if util > util_punch_struct {
+                        util_punch_struct = util;
+                        punch_struct_worst = Some((a.kind.clone(), a.at, f - relief, cap));
+                    }
                 }
             }
             for (i, r) in n.into_iter().enumerate() {
@@ -530,6 +537,7 @@ impl Problem<'_> {
         let mut ev = Evaluation {
             util_punch,
             util_punch_struct,
+            punch_struct_worst,
             shift,
             piles: piles.to_vec(),
             pile_n,
