@@ -43,7 +43,33 @@ pub struct Split {
     pub piles: Vec<([f64; 2], [f64; 6])>,
     /// Что исключено или приближено.
     pub notes: Vec<String>,
+    /// Вертикальные конструкции на плите — для продавливания.
+    pub structures: Vec<Structure>,
 }
+
+/// Вертикальная конструкция над узлом (узлами) плиты.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StructureKind {
+    /// Колонна b × h (м; прямоугольник по A и I стержня, оси сечения — по осям плана).
+    Column { b: f64, h: f64 },
+    /// Торец стены толщиной t; `dir` — направление вдоль стены от торца.
+    WallEnd { t: f64, dir: [f64; 2] },
+    /// Угол стены толщиной t (излом цепочки больше 30°).
+    WallCorner { t: f64 },
+}
+
+#[derive(Clone, Debug)]
+pub struct Structure {
+    pub kind: StructureKind,
+    /// Узел плиты (индекс `raft.nodes`) в характерной точке: ось колонны, торец, угол.
+    pub node: usize,
+    /// Узлы плиты конструкции, нагрузка которых передаётся на загруженную площадь.
+    pub nodes: Vec<usize>,
+}
+
+/// Длина участка стены у торца и угла, передающего нагрузку на продавливание, в долях h0
+/// (допущение: участок длиной h0).
+pub const WALL_PART_H0: f64 = 1.0;
 
 /// Поворотные пружины-стабилизаторы узлов здания, кН·м/рад: гасят местные механизмы
 /// (вращение стержня вокруг оси, поворот из плоскости у пластин без «сверлящей» жёсткости).
@@ -227,5 +253,91 @@ pub fn split(m: &Mesh) -> Result<Split, String> {
     if piles.len() < m.piles.len() {
         notes.push(format!("сваи КЭ 56 вне плиты: {} из {}", m.piles.len() - piles.len(), m.piles.len()));
     }
-    Ok(Split { raft, raft_nodes, raft_cases, building, region, z_mid, h, piles, notes })
+    let structures = find_structures(&bm, &interface, &raft.nodes, h);
+    Ok(Split { raft, raft_nodes, raft_cases, building, region, z_mid, h, piles, notes, structures })
+}
+
+/// Колонны, торцы и углы стен над узлами сопряжения. `h` — толщина плиты (h0 ≈ h для длины
+/// участка стены — с запасом в пользу большей нагрузки на участок).
+fn find_structures(bm: &Model, interface: &[(usize, usize)], raft_xyz: &[V3], h: f64) -> Vec<Structure> {
+    let raft_of: HashMap<usize, usize> = interface.iter().copied().collect();
+    let mut out = vec![];
+    // Колонны: вертикальные стержни из узла сопряжения.
+    for b in &bm.beams {
+        for (n, o) in [(b.n1, b.n2), (b.n2, b.n1)] {
+            let Some(&r) = raft_of.get(&n) else { continue };
+            let (p, q) = (bm.nodes[n], bm.nodes[o]);
+            let d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if l <= 0.0 || d[2] / l < 0.9 {
+                continue;
+            }
+            // Прямоугольник: I = b·h³/12 по сильной оси → h = √(12 I / A), b = A / h.
+            let i = b.iy.max(b.iz);
+            let hh = (12.0 * i / b.a).sqrt();
+            out.push(Structure { kind: StructureKind::Column { b: b.a / hh, h: hh }, node: r, nodes: vec![r] });
+        }
+    }
+    // Стены: вертикальные пластины, рёбра на плите между узлами сопряжения.
+    let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut thick: HashMap<usize, f64> = HashMap::new();
+    for sh in &bm.shells {
+        let zs: Vec<f64> = sh.nodes.iter().map(|&n| bm.nodes[n][2]).collect();
+        let (z0, z1) = zs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, &z| (a.0.min(z), a.1.max(z)));
+        if z1 - z0 < 0.1 {
+            continue; // горизонтальная
+        }
+        let k = sh.nodes.len();
+        for e in 0..k {
+            let (a, b) = (sh.nodes[e], sh.nodes[(e + 1) % k]);
+            if let (Some(&ra), Some(&rb)) = (raft_of.get(&a), raft_of.get(&b)) {
+                if ra != rb && !adj.get(&ra).is_some_and(|v| v.contains(&rb)) {
+                    adj.entry(ra).or_default().push(rb);
+                    adj.entry(rb).or_default().push(ra);
+                }
+                for r in [ra, rb] {
+                    let t = thick.entry(r).or_insert(0.0);
+                    *t = t.max(sh.mat.h);
+                }
+            }
+        }
+    }
+    let xy = |r: usize| [raft_xyz[r][0], raft_xyz[r][1]];
+    let unit = |a: [f64; 2], b: [f64; 2]| {
+        let d = [b[0] - a[0], b[1] - a[1]];
+        let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-12);
+        [d[0] / l, d[1] / l]
+    };
+    let reach = WALL_PART_H0 * h;
+    // Узлы стены в пределах `reach` от точки по цепочке (обход по смежности).
+    let part = |start: usize| -> Vec<usize> {
+        let mut seen = vec![start];
+        let mut stack = vec![start];
+        while let Some(n) = stack.pop() {
+            for &m in adj.get(&n).map_or(&[][..], |v| &v[..]) {
+                let d = ((xy(m)[0] - xy(start)[0]).powi(2) + (xy(m)[1] - xy(start)[1]).powi(2)).sqrt();
+                if !seen.contains(&m) && d <= reach + 1e-9 {
+                    seen.push(m);
+                    stack.push(m);
+                }
+            }
+        }
+        seen
+    };
+    let mut keys: Vec<usize> = adj.keys().copied().collect();
+    keys.sort_unstable();
+    for r in keys {
+        let nb = &adj[&r];
+        let t = thick[&r];
+        if nb.len() == 1 {
+            out.push(Structure { kind: StructureKind::WallEnd { t, dir: unit(xy(r), xy(nb[0])) }, node: r, nodes: part(r) });
+        } else if nb.len() == 2 {
+            let (u, v) = (unit(xy(r), xy(nb[0])), unit(xy(r), xy(nb[1])));
+            // Прямая стена: направления противоположны (cos ≈ −1); излом больше 30°.
+            if u[0] * v[0] + u[1] * v[1] > -(30f64.to_radians().cos()) {
+                out.push(Structure { kind: StructureKind::WallCorner { t }, node: r, nodes: part(r) });
+            }
+        }
+    }
+    out
 }

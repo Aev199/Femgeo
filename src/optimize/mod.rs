@@ -79,6 +79,8 @@ pub struct Problem<'a> {
     /// k = N / (n·s), N — наибольшая суммарная нагрузка длительного сочетания ПС2 (иначе
     /// полных ПС2). None — взаимовлияние по СП 24, п. 7.4.
     pub conditional: Option<ConditionalModel>,
+    /// Продавливание плиты вертикальными конструкциями (нужны `punching` и `building`).
+    pub structure_punch: Vec<PunchArea>,
     /// Подготовка расчёта (заполняется при первой оценке): `Default::default()`.
     pub cache: OnceCell<Prepared>,
 }
@@ -153,6 +155,21 @@ pub struct Punching {
     pub raft: Region,
 }
 
+/// Продавливание плиты вертикальной конструкцией (колонна, торец или угол стены).
+#[derive(Clone, Debug)]
+pub struct PunchArea {
+    /// "column" | "wall_end" | "wall_corner" — для отчёта.
+    pub kind: String,
+    pub at: [f64; 2],
+    /// Узлы плиты, сила здания в которых — нагрузка на загруженную площадь.
+    pub nodes: Vec<usize>,
+    /// Длина расчётного контура (м) без учёта края плиты; точки контура — доля внутри плиты.
+    pub u: f64,
+    pub samples: Vec<[f64; 2]>,
+    /// Область внутри контура: сваи с центром в ней разгружают продавливание.
+    pub inside: Region,
+}
+
 /// Оценка варианта.
 #[derive(Clone, Debug)]
 pub struct Evaluation {
@@ -172,6 +189,8 @@ pub struct Evaluation {
     pub w_nodes: Vec<f64>,
     /// Наибольший Кисп продавливания плиты сваей (0 — не проверялось).
     pub util_punch: f64,
+    /// Наибольший Кисп продавливания плиты колоннами, торцами и углами стен (0 — не проверялось).
+    pub util_punch_struct: f64,
     /// Среднее расстояние от свай до ближайшей существующей сваи, м (NaN — ориентира нет).
     pub shift: f64,
     /// Подбор невозможен хотя бы в одном элементе.
@@ -194,7 +213,7 @@ pub struct ConditionalModel {
 impl Evaluation {
     /// Наибольший Кисп из ограничений (для сравнения недопустимых вариантов).
     pub fn worst(&self, lim: &SettlementLimits) -> f64 {
-        self.util_ground.max(self.util_material).max(self.util_punch).max(self.s_max / lim.s_max).max(self.ds_rel / lim.ds_rel_max)
+        self.util_ground.max(self.util_material).max(self.util_punch).max(self.util_punch_struct).max(self.s_max / lim.s_max).max(self.ds_rel / lim.ds_rel_max)
     }
 }
 
@@ -393,8 +412,38 @@ impl Problem<'_> {
             }
         };
         // ПС1: нагрузки на сваи (R = −K·w, сжатие — положительное) и армирование.
+        // Вертикальная сила здания на узлы плиты в сочетании (вниз > 0): r = f − K·u суперэлемента.
+        let building_down = |c: &[f64], u: &[f64]| -> HashMap<usize, f64> {
+            let mut out: HashMap<usize, f64> = HashMap::new();
+            let Some(b) = self.building else { return out };
+            let nd = b.block.dofs.len();
+            for (i, &di) in b.block.dofs.iter().enumerate() {
+                if di % 6 != 2 {
+                    continue;
+                }
+                let ku: f64 = (0..nd).map(|j| b.block.k[i * nd + j] * u[b.block.dofs[j]]).sum();
+                *out.entry(di / 6).or_default() += ku;
+            }
+            for (f, loads) in c.iter().zip(&b.loads) {
+                for &(n, l) in loads {
+                    *out.entry(n).or_default() -= f * l[2];
+                }
+            }
+            out
+        };
+        let mut util_punch_struct: f64 = 0.0;
         for c in &self.uls {
             let (u, n) = solve(c)?;
+            if let (Some(pp), false) = (&self.punching, self.structure_punch.is_empty()) {
+                let down = building_down(c, &u);
+                for a in &self.structure_punch {
+                    let f: f64 = a.nodes.iter().map(|k| down.get(k).copied().unwrap_or(0.0)).sum();
+                    let relief: f64 = piles.iter().zip(&n).filter(|(&q, _)| a.inside.contains(self.xy(q))).map(|(_, &x)| x).sum();
+                    let frac = a.samples.iter().filter(|&&q| pp.raft.contains(q)).count() as f64 / a.samples.len().max(1) as f64;
+                    let util = (f - relief).max(0.0) / (pp.rbt * a.u * frac.max(1e-9) * pp.h0);
+                    util_punch_struct = util_punch_struct.max(util);
+                }
+            }
             for (i, r) in n.into_iter().enumerate() {
                 pile_n[i] = pile_n[i].max(r);
             }
@@ -480,6 +529,7 @@ impl Problem<'_> {
         };
         let mut ev = Evaluation {
             util_punch,
+            util_punch_struct,
             shift,
             piles: piles.to_vec(),
             pile_n,

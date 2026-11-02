@@ -498,6 +498,50 @@ impl Service {
             "sp24" => None,
             m => return Err(format!("неизвестная модель свай «{m}»")),
         };
+        // Продавливание вертикальными конструкциями (сетка здания): загруженные площади и контуры
+        // на h0/2 (СП 63, п. 8.1.46); торцы и углы стен — участок длиной h0 (допущение).
+        let h0 = r.h - r.cover;
+        let structure_punch: Vec<crate::optimize::PunchArea> = match (&split, input.punching) {
+            (Some(s), true) => s
+                .structures
+                .iter()
+                .map(|st| {
+                    let p = s.raft.nodes[st.node];
+                    let c = [p[0], p[1]];
+                    let mut nodes: Vec<usize> = st.nodes.iter().map(|&k| to_grid[k]).collect();
+                    nodes.sort_unstable();
+                    nodes.dedup();
+                    let rect = |x0: f64, x1: f64, y0: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+                    let along = |poly: Vec<[f64; 2]>, k: usize| -> Vec<[f64; 2]> {
+                        (0..poly.len()).flat_map(|i| {
+                            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                            (0..k).map(move |j| { let t = (j as f64 + 0.5) / k as f64; [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])] })
+                        }).collect()
+                    };
+                    let (kind, u, inside) = match st.kind {
+                        crate::building::StructureKind::Column { b, h } => {
+                            let (hx, hy) = ((b + h0) / 2.0, (h + h0) / 2.0);
+                            ("column", 2.0 * (b + h) + 4.0 * h0, rect(c[0] - hx, c[0] + hx, c[1] - hy, c[1] + hy))
+                        }
+                        crate::building::StructureKind::WallEnd { t, dir } => {
+                            let a = crate::building::WALL_PART_H0 * h0;
+                            let nrm = [-dir[1], dir[0]];
+                            let w = (t + h0) / 2.0;
+                            let q = |s: f64, n: f64| [c[0] + s * dir[0] + n * nrm[0], c[1] + s * dir[1] + n * nrm[1]];
+                            ("wall_end", (t + h0) + 2.0 * (a + h0 / 2.0), vec![q(-h0 / 2.0, -w), q(a, -w), q(a, w), q(-h0 / 2.0, w)])
+                        }
+                        crate::building::StructureKind::WallCorner { t } => {
+                            let a = crate::building::WALL_PART_H0 * h0;
+                            let e = a + t / 2.0 + h0 / 2.0;
+                            ("wall_corner", 2.0 * e + 2.0 * (a - t / 2.0 - h0 / 2.0).max(0.0), rect(c[0] - e, c[0] + e, c[1] - e, c[1] + e))
+                        }
+                    };
+                    let samples = along(inside.clone(), 18);
+                    crate::optimize::PunchArea { kind: kind.into(), at: c, nodes, u, samples, inside: Region { outer: inside, holes: vec![] } }
+                })
+                .collect(),
+            _ => vec![],
+        };
         let problem = Problem {
             raft: raft.clone(),
             pile_head: r.z_bottom,
@@ -526,6 +570,7 @@ impl Service {
             existing: input.existing.clone(),
             pile_fu: input.pile_fu,
             conditional,
+            structure_punch,
             cache: Default::default(),
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
@@ -617,6 +662,7 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bo
         "variants": vs.iter().enumerate().map(|(i, v)| json!({
             "reference": has_reference && i == 0,
             "util_punch": v.util_punch,
+            "util_punch_struct": v.util_punch_struct,
             "shift": if v.shift.is_finite() { json!(v.shift) } else { Value::Null },
             "count": v.piles.len(),
             "kg_m3": v.kg_m3,

@@ -83,6 +83,10 @@ fn run_on_building_mesh() {
     // Нормативная нагрузка 121·40 + 117·20 ≈ 7180 кН; по ПС1 при Fd = 1500 кН — не меньше 5 свай.
     assert!(best["count"].as_u64().unwrap() >= 5, "{}", best["count"]);
     assert_eq!(out["holes"].as_array().unwrap().len(), 1);
+    // Продавливание колонной 0,4 × 0,4: F ≤ ПС1 четверти перекрытия (121·(30·1,1 + 10·1,2)/4 ≈ 1361 кН),
+    // несущая способность Rbt·u·h0 = 1150·(1,6 + 4·0,74)·0,74 ≈ 3880 кН (B30, h0 = 0,8 − 0,06).
+    let ups = best["util_punch_struct"].as_f64().unwrap();
+    assert!(ups > 0.0 && ups <= 1361.5 / (1150.0 * 4.56 * 0.74) + 1e-3, "{ups}");
 }
 
 /// Предел Fu: сваи не больше Fu, сумма сохраняется; условный фундамент — одинаковая жёсткость.
@@ -122,4 +126,43 @@ fn pile_cap_and_conditional() {
     let (_, cond_sum, v) = run(None, "conditional");
     assert!(v["conditional"]["s"].as_f64().unwrap() > 0.0);
     assert!((cond_sum / lin_sum - 1.0).abs() < 0.02);
+}
+
+/// Конструкции: колонна 0,4 × 0,6 и Г-образная стена (2 торца и угол).
+#[test]
+fn structures_detected() {
+    use femgeo::building::StructureKind;
+    let mut m = Mesh::default();
+    m.raft = grid(&mut m, 0.0, 1.0, false);
+    // Колонна в узле (5, 8): A = 0,24, Iy = 0,4·0,6³/12.
+    let top = m.nodes.len();
+    m.nodes.push([5.0, 8.0, 3.0]);
+    m.beams.push(Beam { n1: 8 * 11 + 5, n2: top, e: 3e7, g: 1.25e7, a: 0.24, iy: 0.4 * 0.216 / 12.0, iz: 0.6 * 0.064 / 12.0, j: 1e-3, ref_dir: None });
+    // Стена: (2,2) → (6,2) → (6,6), пластины 1 × 3 м, t = 0,2.
+    let mut wall = |a: [usize; 2], b: [usize; 2], m: &mut Mesh| {
+        let (na, nb) = (a[1] * 11 + a[0], b[1] * 11 + b[0]);
+        let (ta, tb) = (m.nodes.len(), m.nodes.len() + 1);
+        m.nodes.push([a[0] as f64, a[1] as f64, 3.0]);
+        m.nodes.push([b[0] as f64, b[1] as f64, 3.0]);
+        m.shells.push(Shell { nodes: vec![na, nb, tb, ta], mat: ShellMaterial { e: 3e7, nu: 0.2, h: 0.2 } });
+    };
+    for x in 2..6 {
+        wall([x, 2], [x + 1, 2], &mut m);
+    }
+    for y in 2..6 {
+        wall([6, y], [6, y + 1], &mut m);
+    }
+    m.cases.push(vec![(top, [0.0, 0.0, -100.0, 0.0, 0.0, 0.0])]);
+    let s = split(&m).unwrap();
+    let at = |k: usize| [s.raft.nodes[s.structures[k].node][0], s.raft.nodes[s.structures[k].node][1]];
+    let col: Vec<usize> = (0..s.structures.len()).filter(|&k| matches!(s.structures[k].kind, StructureKind::Column { .. })).collect();
+    assert_eq!(col.len(), 1);
+    if let StructureKind::Column { b, h } = s.structures[col[0]].kind {
+        assert!((b - 0.4).abs() < 1e-9 && (h - 0.6).abs() < 1e-9, "{b} {h}");
+    }
+    let mut ends: Vec<[f64; 2]> = (0..s.structures.len()).filter(|&k| matches!(s.structures[k].kind, StructureKind::WallEnd { .. })).map(at).collect();
+    ends.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    assert_eq!(ends, vec![[2.0, 2.0], [6.0, 6.0]]);
+    let corners: Vec<[f64; 2]> = (0..s.structures.len()).filter(|&k| matches!(s.structures[k].kind, StructureKind::WallCorner { .. })).map(at).collect();
+    assert_eq!(corners, vec![[6.0, 2.0]]);
 }
