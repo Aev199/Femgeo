@@ -101,6 +101,10 @@ pub struct Prepared {
     structure_pairs: Vec<(usize, usize, f64)>,
 }
 
+/// Наибольшая доля свай на пределе Fu в одном сочетании для допустимого варианта
+/// (решение пользователя 2026-11-02).
+pub const CAPPED_SHARE_MAX: f64 = 0.10;
+
 /// Наибольшее расстояние между узлами соседних конструкций для Δs/L, м (допущение: пролёт).
 pub const STRUCTURE_SPAN: f64 = 12.0;
 
@@ -172,8 +176,9 @@ pub struct Evaluation {
     pub shift: f64,
     /// Подбор невозможен хотя бы в одном элементе.
     pub design_impossible: bool,
-    /// Хотя бы в одном сочетании сваи ограничены пределом Fu.
+    /// Хотя бы в одном сочетании сваи ограничены пределом Fu; наибольшая доля таких свай.
     pub capped: bool,
+    pub capped_share: f64,
     /// Условный фундамент (если жёсткость свай по нему).
     pub conditional: Option<crate::piles::conditional::Conditional>,
     pub feasible: bool,
@@ -308,6 +313,7 @@ impl Problem<'_> {
         // N > Fu держат Fu, остальные — из совместности (активное множество, только добавление).
         let mut capped_any = false;
         let mut overloaded = false;
+        let mut capped_share: f64 = 0.0;
         let mut solve = |c: &[f64]| -> Result<(Vec<f64>, Vec<f64>), String> {
             let t_lin: Vec<f64> = (0..np).map(|i| c.iter().zip(&t_cases).map(|(f, t)| f * t[i]).sum::<f64>()).collect();
             let mut u = combine(c);
@@ -340,7 +346,9 @@ impl Problem<'_> {
                 (0..np).filter(|&j| capped[j]).for_each(|j| t[j] = -fu);
                 free.iter().zip(&tf).for_each(|(&i, &v)| t[i] = v);
             }
-            if capped.iter().any(|&x| x) {
+            let nc = capped.iter().filter(|&&x| x).count();
+            capped_share = capped_share.max(nc as f64 / np as f64);
+            if nc > 0 {
                 capped_any = true;
                 let mut du = vec![0.0; 6 * p.nodes.len()];
                 for j in 0..np {
@@ -484,10 +492,11 @@ impl Problem<'_> {
             w_nodes,
             design_impossible: impossible,
             capped: capped_any,
+            capped_share,
             conditional,
             feasible: false,
         };
-        ev.feasible = !impossible && !overloaded && ev.worst(&self.limits) <= 1.0;
+        ev.feasible = !impossible && !overloaded && capped_share <= CAPPED_SHARE_MAX + 1e-12 && ev.worst(&self.limits) <= 1.0;
         Ok(ev)
     }
 
