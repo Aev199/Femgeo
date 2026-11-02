@@ -96,6 +96,46 @@ pub struct Prepared {
     u0: Vec<Vec<f64>>,
     /// По кандидатам: перемещения узлов плиты от единичной силы +z в кандидате.
     g: Vec<Vec<f64>>,
+    /// Пары узлов соседних вертикальных конструкций (узлы сопряжения здания, разные
+    /// конструкции, не дальше `STRUCTURE_SPAN`) и расстояние между ними — для Δs/L.
+    structure_pairs: Vec<(usize, usize, f64)>,
+}
+
+/// Наибольшее расстояние между узлами соседних конструкций для Δs/L, м (допущение: пролёт).
+pub const STRUCTURE_SPAN: f64 = 12.0;
+
+/// Узлы сопряжения → конструкции (связные цепочки узлов не дальше 1,5 шага сетки) → пары
+/// узлов разных конструкций на расстоянии до `STRUCTURE_SPAN`.
+fn structure_pairs(xy: &[[f64; 2]], step: f64) -> Vec<(usize, usize, f64)> {
+    let n = xy.len();
+    let mut comp: Vec<usize> = (0..n).collect();
+    fn root(c: &mut Vec<usize>, i: usize) -> usize {
+        let mut r = i;
+        while c[r] != r {
+            r = c[r];
+        }
+        c[i] = r;
+        r
+    }
+    for i in 0..n {
+        for j in i + 1..n {
+            if dist(xy[i], xy[j]) <= 1.5 * step {
+                let (a, b) = (root(&mut comp, i), root(&mut comp, j));
+                comp[a] = b;
+            }
+        }
+    }
+    let c: Vec<usize> = (0..n).map(|i| root(&mut comp, i)).collect();
+    let mut out = vec![];
+    for i in 0..n {
+        for j in i + 1..n {
+            let l = dist(xy[i], xy[j]);
+            if c[i] != c[j] && l <= STRUCTURE_SPAN {
+                out.push((i, j, l));
+            }
+        }
+    }
+    out
 }
 
 /// Данные проверки продавливания.
@@ -365,9 +405,18 @@ impl Problem<'_> {
             }
             for i in 0..np {
                 s_max = s_max.max(-w[i]);
-                for j in i + 1..np {
-                    let l = dist(self.xy(piles[i]), self.xy(piles[j]));
-                    ds_rel = ds_rel.max((w[i] - w[j]).abs() / l);
+            }
+            // Δs/L: между соседними вертикальными конструкциями здания; без здания — между сваями.
+            if p.structure_pairs.is_empty() {
+                for i in 0..np {
+                    for j in i + 1..np {
+                        let l = dist(self.xy(piles[i]), self.xy(piles[j]));
+                        ds_rel = ds_rel.max((w[i] - w[j]).abs() / l);
+                    }
+                }
+            } else {
+                for &(a, b, l) in &p.structure_pairs {
+                    ds_rel = ds_rel.max((u[6 * a + 2] - u[6 * b + 2]).abs() / l);
                 }
             }
             if design {
@@ -487,7 +536,17 @@ impl Problem<'_> {
         let g = lin.solve_many(&units).iter().map(|u| pick(u)).collect();
         let index = cand.iter().enumerate().map(|(i, &n)| (n, i)).collect();
         let pos = nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-        let _ = self.cache.set(Prepared { index, pos, nodes, u0, g });
+        let structure_pairs = match self.building {
+            Some(b) => {
+                let mut ns: Vec<usize> = b.block.dofs.iter().step_by(3).map(|d| d / 6).collect();
+                ns.sort_unstable();
+                ns.dedup();
+                let xy: Vec<[f64; 2]> = ns.iter().map(|&n| self.xy(n)).collect();
+                structure_pairs(&xy, self.mesh_step()).into_iter().map(|(i, j, l)| (ns[i], ns[j], l)).collect()
+            }
+            None => vec![],
+        };
+        let _ = self.cache.set(Prepared { index, pos, nodes, u0, g, structure_pairs });
         Ok(self.cache.get().expect("только что заполнено"))
     }
 
