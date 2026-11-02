@@ -77,6 +77,7 @@ fn run_with(building: Option<&femgeo::fem::condense::Building>, n: usize) -> (Ve
         crack_long: None,
         punching: None,
         existing: vec![],
+        pile_fu: None,
         cache: Default::default(),
     };
     if n == usize::MAX {

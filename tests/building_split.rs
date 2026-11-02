@@ -84,3 +84,33 @@ fn run_on_building_mesh() {
     assert!(best["count"].as_u64().unwrap() >= 5, "{}", best["count"]);
     assert_eq!(out["holes"].as_array().unwrap().len(), 1);
 }
+
+/// Нелинейная работа свай (Fu): пик нагрузки на сваю снижается, итерации сходятся.
+#[test]
+fn nonlinear_piles_redistribute() {
+    use femgeo::service::{default_input, Service};
+    let mut m = Mesh::default();
+    m.raft = grid(&mut m, 0.0, 0.8, false);
+    let raft_nodes: Vec<usize> = (0..121).collect();
+    m.cases.push(raft_nodes.iter().map(|&n| (n, [0.0, 0.0, -60.0, 0.0, 0.0, 0.0])).collect());
+    m.cases.push(raft_nodes.iter().map(|&n| (n, [0.0, 0.0, -10.0, 0.0, 0.0, 0.0])).collect());
+    for i in 0..5 {
+        for j in 0..5 {
+            m.piles.push(([1.0 + 2.0 * i as f64, 1.0 + 2.0 * j as f64, 0.0], [0.0; 6]));
+        }
+    }
+    let run = |fu: Option<f64>| {
+        let mut input = default_input();
+        input.pile.fd = 1e5;
+        input.pile_fu = fu;
+        let out = Service::new().run_mesh(input, &m, &mut |_| {}).unwrap();
+        let v = out["variants"][0].clone();
+        assert!(v["reference"].as_bool().unwrap() && v["converged"].as_bool().unwrap(), "{fu:?} {} {} {}", v["reference"], v["converged"], v["count"]);
+        let n: Vec<f64> = v["piles"].as_array().unwrap().iter().map(|p| p["n"].as_f64().unwrap()).collect();
+        (n.iter().cloned().fold(0.0, f64::max), n.iter().sum::<f64>())
+    };
+    let (lin_max, lin_sum) = run(None);
+    let (nl_max, nl_sum) = run(Some(700.0));
+    assert!(nl_max < 0.95 * lin_max, "{nl_max} {lin_max}");
+    assert!((nl_sum / lin_sum - 1.0).abs() < 0.02, "{nl_sum} {lin_sum}");
+}

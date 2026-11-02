@@ -115,6 +115,9 @@ pub struct Input {
     /// Существующие сваи (X, Y) — ориентир.
     #[serde(default)]
     pub existing: Vec<[f64; 2]>,
+    /// Предельное сопротивление сваи для нелинейной работы в грунте, кН (None — линейно).
+    #[serde(default)]
+    pub pile_fu: Option<f64>,
 }
 
 fn acrc_long() -> f64 {
@@ -498,6 +501,7 @@ impl Service {
             crack_long: crack_long.as_ref(),
             punching: input.punching.then(|| Punching { rbt: c_uls.rbt, h0: r.h - r.cover, raft: Region { outer: r.outline.clone(), holes: r.holes.clone() } }),
             existing: input.existing.clone(),
+            pile_fu: input.pile_fu,
             cache: Default::default(),
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
@@ -593,6 +597,7 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bo
             "ds_rel": v.ds_rel,
             "feasible": v.feasible,
             "design_impossible": v.design_impossible,
+            "converged": v.converged,
             "piles": v.piles.iter().zip(&v.pile_n).map(|(&n, &f)| json!({ "x": raft.nodes[n][0], "y": raft.nodes[n][1], "n": f })).collect::<Vec<_>>(),
             // см²/м
             "rebar": v.rebar.iter().map(|a| a.map(|x| x * 1e4)).collect::<Vec<_>>(),
@@ -672,6 +677,7 @@ pub fn default_input() -> Input {
         acrc_short: acrc_short(),
         punching: true,
         existing: vec![],
+        pile_fu: None,
     }
 }
 

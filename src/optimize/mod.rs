@@ -72,6 +72,10 @@ pub struct Problem<'a> {
     /// Существующие сваи (ориентир, не правило): старт свободного режима и предпочтение
     /// позиций рядом с ними.
     pub existing: Vec<[f64; 2]>,
+    /// Нелинейная работа сваи в грунте (кН): собственная податливость сваи — f / (1 − N/Fu),
+    /// секущие жёсткости по определяющему сочетанию ПС1 (наибольшая сумма нагрузок на сваи),
+    /// затем все сочетания — с ними линейно. None — линейная постановка.
+    pub pile_fu: Option<f64>,
     /// Подготовка расчёта (заполняется при первой оценке): `Default::default()`.
     pub cache: OnceCell<Prepared>,
 }
@@ -125,6 +129,8 @@ pub struct Evaluation {
     pub shift: f64,
     /// Подбор невозможен хотя бы в одном элементе.
     pub design_impossible: bool,
+    /// Итерации нелинейной работы свай сошлись (в линейной постановке — всегда).
+    pub converged: bool,
     pub feasible: bool,
 }
 
@@ -185,6 +191,40 @@ impl Problem<'_> {
         for i in 0..np {
             for j in 0..np {
                 a[i * np + j] += 0.5 * (at(&p.g[idx[j]], piles[i]) + at(&p.g[idx[i]], piles[j]));
+            }
+        }
+        let mut converged = true;
+        if let Some(fu) = self.pile_fu {
+            let base = a.clone();
+            let w0: Vec<Vec<f64>> = p.u0.iter().map(|u0| piles.iter().map(|&n| at(u0, n)).collect()).collect();
+            let forces = |a: &[f64], c: &[f64]| -> Result<Vec<f64>, String> {
+                let ch = cholesky(a, np)?;
+                let w: Vec<f64> = (0..np).map(|i| c.iter().zip(&w0).map(|(f, w)| f * w[i]).sum()).collect();
+                Ok(chol_solve(&ch, np, &w).into_iter().map(|t| -t).collect())
+            };
+            let mut reference: (f64, Vec<f64>) = (f64::NEG_INFINITY, vec![]);
+            for c in &self.uls {
+                let total: f64 = forces(&a, c)?.iter().sum();
+                if total > reference.0 {
+                    reference = (total, c.clone());
+                }
+            }
+            let mut n = forces(&a, &reference.1)?;
+            converged = false;
+            for _ in 0..100 {
+                let mut a2 = base.clone();
+                for i in 0..np {
+                    let q = (n[i] / fu).clamp(0.0, 0.95);
+                    a2[i * np + i] += field.flexibility[i * np + i] * (1.0 / (1.0 - q) - 1.0);
+                }
+                let n2 = forces(&a2, &reference.1)?;
+                let change = n2.iter().zip(&n).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+                n = n.iter().zip(&n2).map(|(x, y)| 0.5 * (x + y)).collect();
+                a = a2;
+                if change < 1e-3 * fu {
+                    converged = true;
+                    break;
+                }
             }
         }
         let chol = cholesky(&a, np)?;
@@ -342,9 +382,10 @@ impl Problem<'_> {
             rebar: env,
             w_nodes,
             design_impossible: impossible,
+            converged,
             feasible: false,
         };
-        ev.feasible = !impossible && ev.worst(&self.limits) <= 1.0;
+        ev.feasible = !impossible && converged && ev.worst(&self.limits) <= 1.0;
         Ok(ev)
     }
 
