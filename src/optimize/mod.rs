@@ -302,6 +302,7 @@ impl Problem<'_> {
             next.nl_factor = d;
             let scale = load.iter().fold(0.0f64, |a, x| a.max(x.abs())).max(1e-9);
             let change = load.iter().zip(&next.pile_n_sls).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / scale;
+            if std::env::var("FEMGEO_DBG").is_ok() { eprintln!("DBG it {it} change {change:.4}"); }
             e = next;
             if change < tol {
                 return Ok((e, it));

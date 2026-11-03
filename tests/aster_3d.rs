@@ -193,7 +193,7 @@ fn nonlinear_coupling_model_law() {
     let (p, grid) = problem(&layered);
     let f = Field::new(&p.piles_of(&grid), &layered).flexibility;
     let n = grid.len();
-    let nu = 5000.0;
+    let nu: f64 = std::env::var("NU").map(|v| v.parse().unwrap()).unwrap_or(5000.0);
     let mut calls = 0;
     let mut settle = |load: &[f64]| -> Result<Vec<f64>, String> {
         calls += 1;

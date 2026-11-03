@@ -395,8 +395,9 @@ fn comm_head(g: &Grid, quadratic: bool, nl: bool) -> Result<String, String> {
 }
 
 const G: f64 = 9.81;
-/// Допуск невязки (доля нагрузки); 1e-4 с начальной матрицей занижает D на 2 %.
-const NL_RESI: f64 = 1e-5;
+/// Допуск невязки — наибольшая узловая сила, доля наибольшей силы на узел головы. Не
+/// относительный: RESI_GLOB_RELA нормируется весом массива (≫ нагрузок свай), D «шумит».
+const NL_RESI: f64 = 1e-4;
 /// Наименьшее сцепление, кПа (допущение для сходимости у поверхности).
 const MC_C_MIN: f64 = 1.0;
 
@@ -455,7 +456,7 @@ rows = [[-1.0] + [-np.mean(vl[h, izl]) for h in heads]]
 from libaster import AsterError
 kw = dict(MODELE=mod, CHAM_MATER=cm, EXCIT=(_F(CHARGE=bc), _F(CHARGE=grav), _F(CHARGE=load, FONC_MULT=ramp)),
     COMPORTEMENT=comp, NEWTON=_F(MATRICE='ELASTIQUE', REAC_INCR=0, REAC_ITER=0),
-    CONVERGENCE=_F(RESI_GLOB_RELA=RESI, ITER_GLOB_MAXI=300), SOLVEUR=_F(METHODE='MUMPS'))
+    CONVERGENCE=_F(RESI_GLOB_MAXI=RESI * max(N) / 4.0, ITER_GLOB_MAXI=500), SOLVEUR=_F(METHODE='MUMPS'))
 # Первый шаг, затем остальные одним вызовом (reuse): при несходимости пройденные шаги
 # остаются в res (результат дальше не определён). Матрица — начальная упругая (одно
 # разложение на вызов, симметричная): у срыва сходится надёжнее касательной.
