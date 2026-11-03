@@ -964,14 +964,38 @@ impl Service {
             m.fixed.push((b, [true, true, false, false, false, true]));
             m.springs.push(crate::fem::Spring { node: b, k: [0.0, 0.0, PENALTY, PENALTY, PENALTY, 0.0] });
         }
+        // Перемещения плиты в точке узла сопряжения: билинейно по элементу сетки (иначе — ближайший узел).
+        let weights: Vec<Vec<(usize, f64)>> = ifs
+            .iter()
+            .map(|&(b, g)| {
+                let p = [bm.nodes[b][0], bm.nodes[b][1]];
+                match element_at(raft, p) {
+                    Some(e) if raft.shells[e].nodes.len() == 4 => {
+                        let ns = &raft.shells[e].nodes;
+                        let (x0, x1) = ns.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, &n| (a.0.min(raft.nodes[n][0]), a.1.max(raft.nodes[n][0])));
+                        let (y0, y1) = ns.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |a, &n| (a.0.min(raft.nodes[n][1]), a.1.max(raft.nodes[n][1])));
+                        let (sx, sy) = ((p[0] - x0) / (x1 - x0), (p[1] - y0) / (y1 - y0));
+                        ns.iter()
+                            .map(|&n| {
+                                let fx = if (raft.nodes[n][0] - x0).abs() < 1e-9 { 1.0 - sx } else { sx };
+                                let fy = if (raft.nodes[n][1] - y0).abs() < 1e-9 { 1.0 - sy } else { sy };
+                                (n, fx * fy)
+                            })
+                            .collect()
+                    }
+                    _ => vec![(g, 1.0)],
+                }
+            })
+            .collect();
         let cases: Vec<LoadCase> = lm
             .building_cases
             .iter()
             .zip(&u_raft)
             .map(|(bc, u)| {
                 let mut nodal = bc.nodal.clone();
-                for &(b, g) in &ifs {
-                    nodal.push((b, [0.0, 0.0, PENALTY * u[6 * g + 2], PENALTY * u[6 * g + 3], PENALTY * u[6 * g + 4], 0.0]));
+                for (&(b, _), w) in ifs.iter().zip(&weights) {
+                    let v = |k: usize| w.iter().map(|&(g, c)| c * u[6 * g + k]).sum::<f64>();
+                    nodal.push((b, [0.0, 0.0, PENALTY * v(2), PENALTY * v(3), PENALTY * v(4), 0.0]));
                 }
                 LoadCase { nodal, pressure: vec![] }
             })
