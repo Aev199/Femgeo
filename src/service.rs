@@ -1056,10 +1056,14 @@ impl Service {
             fields[e] = el.required;
         }
         let mx: Vec<f64> = (0..4).map(|k| fields.iter().map(|f| f[k] * 1e4).fold(0.0, f64::max)).collect();
+        // Элемент с наибольшим армированием: центр, толщина, требуемое (см²/м).
+        let worst = (0..m.shells.len()).max_by(|&a, &b| fields[a].iter().cloned().fold(0.0, f64::max).total_cmp(&fields[b].iter().cloned().fold(0.0, f64::max))).unwrap();
+        let wc = m.shells[worst].nodes.iter().fold([0.0; 3], |a, &k| { let p = m.nodes[k]; let n = m.shells[worst].nodes.len() as f64; [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n] });
         let summary = json!({
             "variant": i, "elements": n, "ground": lm.ground, "kg": kg, "kg_m3": kg / vol.max(1e-9), "volume": vol,
             "impossible": impossible, "strip_fails": strip, "asw_max": asw_max, "thicknesses": hs,
             "max": mx,
+            "worst": { "x": wc[0], "y": wc[1], "z": wc[2], "h": m.shells[worst].mat.h, "as": fields[worst].map(|x| x * 1e4) },
         });
         self.last_underground = Some((m, fields));
         Ok(summary)
