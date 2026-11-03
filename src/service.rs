@@ -295,6 +295,8 @@ struct LastMesh {
     combos: crate::loads::Combinations,
     /// Отметка поверхности грунта в центре плиты: ниже — подземная часть.
     ground: f64,
+    /// Здание, приведённое к плите (узлы сетки, нормативные нагрузки).
+    building: Option<crate::fem::condense::Building>,
 }
 
 impl Service {
@@ -682,7 +684,7 @@ impl Service {
         }
         self.last_mesh = split.map(|s| {
             let building_cases = s.building_cases.iter().zip(&norms).map(|(lc, &k)| LoadCase { nodal: lc.nodal.iter().map(|&(n, f)| (n, f.map(|x| x * k))).collect(), pressure: vec![] }).collect();
-            LastMesh { split: s, to_grid, raft_cases: raft_cases_norm, building_cases, combos, ground }
+            LastMesh { split: s, to_grid, raft_cases: raft_cases_norm, building_cases, combos, ground, building: building.clone() }
         });
         self.last_underground = None;
         self.last = Some((input, raft, variants));
@@ -922,10 +924,10 @@ impl Service {
 }
 
 impl Service {
-    /// Армирование подземной части (этап 2): полная линейная модель варианта — плита на
-    /// регулярной сетке (отметка середины плиты), здание без конденсации (узлы сопряжения — в
-    /// узлах сетки, в них удержаны сдвиги и поворот вокруг вертикали, как при конденсации), сваи —
-    /// пружины с податливостью варианта (без предела Fu). Подбор (`reinforce::design`, СП 63) —
+    /// Армирование подземной части (этап 2): модель этапа 1 варианта (плита, здание суперэлементом,
+    /// сваи — пружины с податливостью варианта, без предела Fu) даёт перемещения узлов сопряжения;
+    /// здание на своих узлах решается с этими перемещениями (пружины-штрафы uz, θx, θy; сдвиги и
+    /// поворот вокруг вертикали закреплены) — без искажения геометрии слиянием узлов. Подбор (`reinforce::design`, СП 63) —
     /// пластины здания ниже поверхности грунта; сечение — толщина пластины, защитный слой и
     /// диаметр — как у плиты, бетон и арматура — как у плиты (допущение).
     fn design_underground(&mut self, args: &Value, progress: &mut dyn FnMut(&str)) -> Result<Value, String> {
@@ -934,49 +936,47 @@ impl Service {
         let lm = self.last_mesh.as_ref().ok_or("нет расчёта по сетке здания")?;
         let v = vs.get(i).ok_or("нет такого варианта")?;
         let bm = lm.split.building_model.as_ref().ok_or("в сетке нет здания")?;
-        progress("полная модель");
-        let mut m = raft.clone();
-        for p in m.nodes.iter_mut() {
-            p[2] = lm.split.z_mid;
-        }
-        let raft_shells = m.shells.len();
-        let iface: std::collections::HashMap<usize, usize> = lm.split.interface.iter().map(|&(b, r)| (b, lm.to_grid[r])).collect();
-        let mut map = vec![0usize; bm.nodes.len()];
-        for (k, p) in bm.nodes.iter().enumerate() {
-            map[k] = match iface.get(&k) {
-                Some(&g) => g,
-                None => {
-                    m.nodes.push(*p);
-                    m.nodes.len() - 1
-                }
-            };
-        }
-        for sh in &bm.shells {
-            m.shells.push(Shell { nodes: sh.nodes.iter().map(|&n| map[n]).collect(), mat: sh.mat });
-        }
-        for b in &bm.beams {
-            m.beams.push(crate::fem::Beam { n1: map[b.n1], n2: map[b.n2], ..b.clone() });
-        }
-        for sp in &bm.springs {
-            if !iface.contains_key(&sp.node) {
-                m.springs.push(crate::fem::Spring { node: map[sp.node], k: sp.k });
-            }
-        }
-        let mut gs: Vec<usize> = iface.values().copied().collect();
-        gs.sort_unstable();
-        gs.dedup();
-        for g in gs {
-            m.fixed.push((g, [true, true, false, false, false, true]));
-        }
-        // Сваи: группа пружин с жёсткостью, обратной податливости варианта.
+        progress("плита варианта");
+        // 1. Модель этапа 1: плита, здание суперэлементом, сваи — группа пружин; перемещения по загружениям.
         let np = v.piles.len();
-        m.spring_groups.push(crate::fem::SpringGroup { nodes: v.piles.clone(), k: invert(&v.pile_flex, np)? });
-        let cases: Vec<LoadCase> = lm
+        let mut rm = raft.clone();
+        let blk = lm.building.as_ref().ok_or("в сетке нет здания")?;
+        rm.blocks.push(blk.block.clone());
+        for &d in blk.block.dofs.iter().step_by(3) {
+            rm.fixed.push((d / 6, [true, true, false, false, false, true]));
+        }
+        rm.spring_groups.push(crate::fem::SpringGroup { nodes: v.piles.clone(), k: invert(&v.pile_flex, np)? });
+        let lin = rm.factorize()?;
+        let u_raft: Vec<Vec<f64>> = lm
             .raft_cases
             .iter()
-            .zip(&lm.building_cases)
-            .map(|(r, b)| LoadCase { nodal: r.nodal.iter().copied().chain(b.nodal.iter().map(|&(n, f)| (map[n], f))).collect(), pressure: vec![] })
+            .zip(&blk.loads)
+            .map(|(rc, bl)| lin.solve(&rm, &LoadCase { nodal: rc.nodal.iter().copied().chain(bl.iter().copied()).collect(), pressure: vec![] }))
+            .collect::<Result<_, _>>()?;
+        // 2. Здание на своих узлах: в узлах сопряжения — перемещения плиты (uz, θx, θy) пружинами-
+        // штрафами, сдвиги и поворот вокруг вертикали закреплены (как при конденсации).
+        progress("здание: перемещения узлов сопряжения");
+        const PENALTY: f64 = 1e10;
+        let mut m = bm.clone();
+        let mut ifs: Vec<(usize, usize)> = lm.split.interface.iter().map(|&(b, r)| (b, lm.to_grid[r])).collect();
+        ifs.sort_unstable();
+        for &(b, _) in &ifs {
+            m.fixed.push((b, [true, true, false, false, false, true]));
+            m.springs.push(crate::fem::Spring { node: b, k: [0.0, 0.0, PENALTY, PENALTY, PENALTY, 0.0] });
+        }
+        let cases: Vec<LoadCase> = lm
+            .building_cases
+            .iter()
+            .zip(&u_raft)
+            .map(|(bc, u)| {
+                let mut nodal = bc.nodal.clone();
+                for &(b, g) in &ifs {
+                    nodal.push((b, [0.0, 0.0, PENALTY * u[6 * g + 2], PENALTY * u[6 * g + 3], PENALTY * u[6 * g + 4], 0.0]));
+                }
+                LoadCase { nodal, pressure: vec![] }
+            })
             .collect();
+        let raft_shells = 0;
         // Подземные пластины здания и группы по толщине.
         let r = &input.raft;
         let cc = concrete(&r.concrete)?;
