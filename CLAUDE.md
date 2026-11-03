@@ -26,6 +26,7 @@ src/fem/        МКЭ: shell.rs (MITC4/T3), mod.rs (модель, сборка,
 src/piles/      СП 24: осадка и взаимовлияние (mod.rs), расстановка (layout.rs), условный фундамент (conditional.rs)
 src/loads.rs    сочетания СП 20
 src/optimize/   подбор свай: regular (ряды), frontier (свободно), продавливание PunchArea, предел Fu
+src/aster/       этап 3: 3D-грунт в Code_Aster → матрица податливости свай
 src/reinforce.rs армирование здания, изополя DXF
 src/building.rs сетка здания (topo) → плита, здание, сваи КЭ 56, конструкции для продавливания
 src/report.rs   отчёт HTML по варианту
