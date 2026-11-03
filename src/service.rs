@@ -536,13 +536,15 @@ impl Service {
                             let segs = vec![(q(s0, -w), q(s0, w), [-dir[0], -dir[1]]), (q(s0, w), q(s1, w), nrm), (q(s0, -w), q(s1, -w), [-nrm[0], -nrm[1]])];
                             let mut v = vec![("wall_end", 3.0 * l, vec![q(s0, -w), q(s1, -w), q(s1, w), q(s0, w)], segs, vec![nrm])];
                             // Торец у края плиты (СП 430, п. 6.3.8): дополнительно — контур из двух участков
-                            // вдоль граней стены на h0/2, от края плиты до конца боковых участков.
+                            // вдоль граней стены на h0/2 от края плиты.
                             let region = Region { outer: r.outline.clone(), holes: r.holes.clone() };
                             let edge = (1..=40).map(|k| -(k as f64) * h0 / 40.0).find(|&sv| !region.contains(q(sv, 0.0)));
                             if let Some(se) = edge {
+                                // Участки длиной t от края плиты вдоль стены (по тексту п. 6.3.8; сверить с рис. 6.1).
                                 let se = se + h0 / 80.0;
-                                let segs2 = vec![(q(se, w), q(s1, w), nrm), (q(se, -w), q(s1, -w), [-nrm[0], -nrm[1]])];
-                                v.push(("wall_end_edge", 2.0 * (s1 - se), vec![q(se, -w), q(s1, -w), q(s1, w), q(se, w)], segs2, vec![nrm]));
+                                let s2 = se + t;
+                                let segs2 = vec![(q(se, w), q(s2, w), nrm), (q(se, -w), q(s2, -w), [-nrm[0], -nrm[1]])];
+                                v.push(("wall_end_edge", 2.0 * t, vec![q(se, -w), q(s2, -w), q(s2, w), q(se, w)], segs2, vec![nrm]));
                             }
                             v
                         }

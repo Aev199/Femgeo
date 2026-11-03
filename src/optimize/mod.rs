@@ -467,7 +467,7 @@ impl Problem<'_> {
             let (u, n) = solve(c)?;
             if let (Some(pp), false) = (&self.punching, self.structure_punch.is_empty()) {
                 let down = building_down(c, &u);
-                let mut q_of: HashMap<usize, [f64; 2]> = HashMap::new();
+                let mut q_of: HashMap<usize, [f64; 9]> = HashMap::new();
                 for (ai, a) in self.structure_punch.iter().enumerate() {
                     let (f, cap, mterm) = if let Some(sh) = &a.shear {
                         // Равнодействующая поперечных сил по контуру (глобальные оси плана) и её момент.
@@ -480,7 +480,8 @@ impl Problem<'_> {
                                 let cc: Vec<V3> = el.nodes.iter().map(|&k| m.nodes[k]).collect();
                                 let ue: Vec<f64> = el.nodes.iter().flat_map(|&k| u[6 * k..6 * k + 6].to_vec()).collect();
                                 let (r, f) = fem::shell::forces(&cc, &el.mat, &ue).expect("элемент проверен при сборке");
-                                [f[6] * r[0][0] + f[7] * r[1][0], f[6] * r[0][1] + f[7] * r[1][1]]
+                                // Qx, Qy и моменты плиты (Mx, My, Mxy) в осях элемента + оси элемента в плане.
+                                [f[6] * r[0][0] + f[7] * r[1][0], f[6] * r[0][1] + f[7] * r[1][1], f[3], f[4], f[5], r[0][0], r[0][1], r[1][0], r[1][1]]
                             });
                             let v = (q[0] * nrm[0] + q[1] * nrm[1]) * ds;
                             sum += v;
@@ -488,15 +489,32 @@ impl Problem<'_> {
                             qn.push(v);
                         }
                         let pts: Vec<([f64; 2], f64)> = sh.iter().map(|x| (x.3, x.2)).collect();
+                        // Торец стены (СП 430, п. 6.3.8): сосредоточенный момент из плоскости стены — половина
+                        // разности изгибающих моментов плиты по обе стороны стены (участки вдоль стены).
                         let ms: Vec<f64> = a
                             .moment_axes
                             .iter()
                             .map(|&ax| {
-                                let (wb, y) = section(&pts, ax);
-                                let mm: f64 = qn.iter().zip(&y).map(|(v, y)| v * y).sum::<f64>().abs();
-                                mm / (pp.rbt * wb * pp.h0)
+                                let (wb, _) = section(&pts, ax);
+                                let (mut left, mut right) = (0.0, 0.0);
+                                for &(e, nrm, ds, _) in sh {
+                                    let side = nrm[0] * ax[0] + nrm[1] * ax[1];
+                                    if side.abs() < 0.9 {
+                                        continue;
+                                    }
+                                    let q = q_of[&e];
+                                    let al = [ax[0] * q[5] + ax[1] * q[6], ax[0] * q[7] + ax[1] * q[8]];
+                                    let mnn = al[0] * al[0] * q[2] + al[1] * al[1] * q[3] + 2.0 * al[0] * al[1] * q[4];
+                                    if side > 0.0 {
+                                        left += mnn * ds;
+                                    } else {
+                                        right += mnn * ds;
+                                    }
+                                }
+                                0.5 * (left - right).abs() / (pp.rbt * wb * pp.h0)
                             })
                             .collect();
+                        let _ = &qn;
                         (sum.abs(), pp.rbt * len.max(1e-9) * pp.h0, ms)
                     } else {
                         let tot = a.nodes.iter().fold([0.0; 3], |acc, k| {
