@@ -23,13 +23,14 @@
 ```
 src/sp63/       расчёты сечений СП 63 (перенос OpenCS, карта upstream/opencs.lock)
 src/fem/        МКЭ: shell.rs (MITC4/T3), mod.rs (модель, сборка, faer), condense.rs
-src/piles/      СП 24: осадка и взаимовлияние свай (mod.rs), правила расстановки (layout.rs)
+src/piles/      СП 24: осадка и взаимовлияние (mod.rs), расстановка (layout.rs), условный фундамент (conditional.rs)
 src/loads.rs    сочетания СП 20
-src/optimize/   подбор свай: Problem::regular (ряды), Problem::frontier (свободно), Вудбери
+src/optimize/   подбор свай: regular (ряды), frontier (свободно), продавливание PunchArea, предел Fu
 src/reinforce.rs армирование здания, изополя DXF
-src/building.rs здание целиком (сетка topo) → плита + сконденсированное здание
+src/building.rs сетка здания (topo) → плита, здание, сваи КЭ 56, конструкции для продавливания
+src/report.rs   отчёт HTML по варианту
 src/geobase.rs  чтение объекта geobase (SQLite)
-src/service.rs  команды окна: defaults, run, open_geobase, save/load_project, экспорты
+src/service.rs  команды: run, run_mesh, verify_mesh, design_underground, экспорты
 app/            окно Tauri 2 (будет заменено режимом «Фундамент» в topo) (src-tauri) и интерфейс (ui: index.html, src/main.js, plan.js, app.css; style.css — дизайн-код GeoBase из topo)
 examples/       ui_server.rs (отладочный мост), bench_*.rs, profile_sp63.rs
 tests/          интеграционные тесты; common/ — фикстура OpenCS
@@ -57,9 +58,9 @@ cargo build --release --example ui_server  # мост: target/release/examples/u
   после каждой пересборки.
 - .NET недоступен (установка запрещена) — эталоны C# только из тестов OpenCS
   или через CI.
-- crates.io и npm доступны; Gmsh в контейнере нет.
-- Связанные репозитории (только чтение): `Aev199/topo_reconstruct_rs`
-  (геометрия ЛИРА, актуальная ветка `claude/building-geometry-recovery-vditix`),
+- crates.io и npm доступны; Gmsh — колесо PyPI (см. DEV_STATE, «Среда»).
+- Связанные репозитории: `Aev199/topo_reconstruct_rs` (вход и окно «Фундамент»,
+  ветка `claude/building-geometry-recovery-vditix`, запись разрешена),
   `Aev199/geobase`, `Aev199/cscore-pile-poc` (эталоны АРБАТ),
   `rumata-ap/OpenCS` (источник переноса).
 
