@@ -45,6 +45,11 @@ pub struct Split {
     pub notes: Vec<String>,
     /// Вертикальные конструкции на плите — для продавливания.
     pub structures: Vec<Structure>,
+    /// Здание без конденсации (для полной модели): элементы на своих узлах, стабилизаторы;
+    /// узлы сопряжения (узел здания, узел плиты); нагрузки здания по загружениям.
+    pub building_model: Option<Model>,
+    pub interface: Vec<(usize, usize)>,
+    pub building_cases: Vec<LoadCase>,
 }
 
 /// Вертикальная конструкция над узлом (узлами) плиты.
@@ -254,7 +259,8 @@ pub fn split(m: &Mesh) -> Result<Split, String> {
         notes.push(format!("сваи КЭ 56 вне плиты: {} из {}", m.piles.len() - piles.len(), m.piles.len()));
     }
     let structures = find_structures(&bm, &interface, &raft.nodes, h);
-    Ok(Split { raft, raft_nodes, raft_cases, building, region, z_mid, h, piles, notes, structures })
+    let building_model = (!bm.nodes.is_empty()).then_some(bm);
+    Ok(Split { raft, raft_nodes, raft_cases, building, region, z_mid, h, piles, notes, structures, building_model, interface, building_cases: b_cases })
 }
 
 /// Колонны, торцы и углы стен над узлами сопряжения. `h` — толщина плиты (h0 ≈ h для длины

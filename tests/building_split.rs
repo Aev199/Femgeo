@@ -167,3 +167,40 @@ fn structures_detected() {
     let corners: Vec<[f64; 2]> = (0..s.structures.len()).filter(|&k| matches!(s.structures[k].kind, StructureKind::WallCorner { .. })).map(at).collect();
     assert_eq!(corners, vec![[6.0, 2.0]]);
 }
+
+/// Армирование подземной части: стены подвала по контуру и перекрытие ниже поверхности грунта.
+#[test]
+fn underground_reinforcement() {
+    use femgeo::service::{default_input, Service, SoilInput};
+    use serde_json::json;
+    let mut m = Mesh::default();
+    m.raft = grid(&mut m, 0.0, 0.8, false);
+    let top = grid(&mut m, 3.0, 0.25, false);
+    // Стены по контуру: пластины 1 × 3 м между узлами плиты и перекрытия.
+    let mut walls = 0;
+    for k in 0..10 {
+        for (a, b) in [((0, k), (0, k + 1)), ((10, k), (10, k + 1)), ((k, 0), (k + 1, 0)), ((k, 10), (k + 1, 10))] {
+            let (na, nb) = (a.1 * 11 + a.0, b.1 * 11 + b.0);
+            m.shells.push(Shell { nodes: vec![na, nb, 121 + nb, 121 + na], mat: ShellMaterial { e: 3e7, nu: 0.2, h: 0.3 } });
+            walls += 1;
+        }
+    }
+    m.cases.push((121..242).map(|n| (n, [0.0, 0.0, -40.0, 0.0, 0.0, 0.0])).collect());
+    m.cases.push((121..242).map(|n| (n, [0.0, 0.0, -10.0, 0.0, 0.0, 0.0])).collect());
+    for (x, y) in [(2.0, 2.0), (8.0, 2.0), (2.0, 8.0), (8.0, 8.0), (5.0, 5.0)] {
+        m.piles.push(([x, y, 0.0], [0.0; 6]));
+    }
+    let mut input = default_input();
+    input.pile.fd = 1e5;
+    if let SoilInput::Layers { top, .. } = &mut input.soil {
+        *top = 3.5;
+    }
+    let mut s = Service::new();
+    s.run_mesh(input, &m, &mut |_| {}).unwrap();
+    let r = s.dispatch("design_underground", json!({ "variant": 0 }), &mut |_| {}).unwrap();
+    assert_eq!(r["elements"].as_u64().unwrap() as usize, walls + top.len(), "{r}");
+    assert!(r["kg"].as_f64().unwrap() > 0.0 && r["impossible"].as_u64().unwrap() == 0, "{r}");
+    let path = std::env::temp_dir().join("femgeo_underground.dxf");
+    s.dispatch("export_underground_dxf", json!({ "path": path }), &mut |_| {}).unwrap();
+    assert!(std::fs::read_to_string(&path).unwrap().contains("AS_TOP_X"));
+}

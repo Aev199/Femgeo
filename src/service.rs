@@ -280,6 +280,21 @@ pub struct Service {
     last: Option<(Input, Model, Vec<Evaluation>)>,
     /// Первый вариант последнего расчёта — существующая расстановка.
     last_reference: bool,
+    /// Последний расчёт по сетке здания — для полной модели (армирование подземной части).
+    last_mesh: Option<LastMesh>,
+    /// Армирование подземной части последнего варианта: полная модель и поля, м²/м.
+    last_underground: Option<(Model, Vec<[f64; 4]>)>,
+}
+
+struct LastMesh {
+    split: crate::building::Split,
+    to_grid: Vec<usize>,
+    /// Нормативные нагрузки: плита (узлы сетки) и здание (узлы модели здания).
+    raft_cases: Vec<LoadCase>,
+    building_cases: Vec<LoadCase>,
+    combos: crate::loads::Combinations,
+    /// Отметка поверхности грунта в центре плиты: ниже — подземная часть.
+    ground: f64,
 }
 
 impl Service {
@@ -295,6 +310,16 @@ impl Service {
             "export_csv" => self.export(&args, false),
             "export_dxf" => self.export(&args, true),
             "export_rebar_dxf" => self.export_rebar(&args),
+            "design_underground" => self.design_underground(&args, progress),
+            "export_underground_dxf" => {
+                let path = args.get("path").and_then(Value::as_str).ok_or("нет пути к файлу")?;
+                let (m, f) = self.last_underground.as_ref().ok_or("нет армирования подземной части")?;
+                let c = |k: usize| -> Vec<f64> { f.iter().map(|a| a[k] * 1e4).collect() };
+                let (tx, ty, bx, by) = (c(0), c(1), c(2), c(3));
+                let text = crate::reinforce::dxf_fields(m, &[("AS_TOP_X", &tx), ("AS_TOP_Y", &ty), ("AS_BOT_X", &bx), ("AS_BOT_Y", &by)], "см²/м");
+                std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))?;
+                Ok(json!({ "path": path }))
+            }
             "export_report" => self.export_report(&args),
             "save_project" => {
                 let path = args.get("path").and_then(Value::as_str).ok_or("нет пути к файлу")?;
@@ -592,6 +617,12 @@ impl Service {
                 .collect(),
             _ => vec![],
         };
+        let raft_cases_norm = cases.clone();
+        let ground = {
+            let n = r.outline.len() as f64;
+            let c = r.outline.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n]);
+            soil(c[0], c[1]).top
+        };
         let problem = Problem {
             raft: raft.clone(),
             pile_head: r.z_bottom,
@@ -649,6 +680,11 @@ impl Service {
             st.dedup();
             out["structures"] = json!(st);
         }
+        self.last_mesh = split.map(|s| {
+            let building_cases = s.building_cases.iter().zip(&norms).map(|(lc, &k)| LoadCase { nodal: lc.nodal.iter().map(|&(n, f)| (n, f.map(|x| x * k))).collect(), pressure: vec![] }).collect();
+            LastMesh { split: s, to_grid, raft_cases: raft_cases_norm, building_cases, combos, ground }
+        });
+        self.last_underground = None;
         self.last = Some((input, raft, variants));
         self.last_reference = has_reference;
         Ok(out)
@@ -883,4 +919,169 @@ impl Service {
             "raft": { "area": polygon_area(&s.region.outer) - s.region.holes.iter().map(|h| polygon_area(h)).sum::<f64>(), "h": s.h, "z": s.z_mid, "holes": s.region.holes.len() },
         }))
     }
+}
+
+impl Service {
+    /// Армирование подземной части (этап 2): полная линейная модель варианта — плита на
+    /// регулярной сетке (отметка середины плиты), здание без конденсации (узлы сопряжения — в
+    /// узлах сетки, в них удержаны сдвиги и поворот вокруг вертикали, как при конденсации), сваи —
+    /// пружины с податливостью варианта (без предела Fu). Подбор (`reinforce::design`, СП 63) —
+    /// пластины здания ниже поверхности грунта; сечение — толщина пластины, защитный слой и
+    /// диаметр — как у плиты, бетон и арматура — как у плиты (допущение).
+    fn design_underground(&mut self, args: &Value, progress: &mut dyn FnMut(&str)) -> Result<Value, String> {
+        let i = args.get("variant").and_then(Value::as_u64).ok_or("не выбран вариант")? as usize;
+        let (input, raft, vs) = self.last.as_ref().ok_or("нет результата расчёта")?;
+        let lm = self.last_mesh.as_ref().ok_or("нет расчёта по сетке здания")?;
+        let v = vs.get(i).ok_or("нет такого варианта")?;
+        let bm = lm.split.building_model.as_ref().ok_or("в сетке нет здания")?;
+        progress("полная модель");
+        let mut m = raft.clone();
+        for p in m.nodes.iter_mut() {
+            p[2] = lm.split.z_mid;
+        }
+        let raft_shells = m.shells.len();
+        let iface: std::collections::HashMap<usize, usize> = lm.split.interface.iter().map(|&(b, r)| (b, lm.to_grid[r])).collect();
+        let mut map = vec![0usize; bm.nodes.len()];
+        for (k, p) in bm.nodes.iter().enumerate() {
+            map[k] = match iface.get(&k) {
+                Some(&g) => g,
+                None => {
+                    m.nodes.push(*p);
+                    m.nodes.len() - 1
+                }
+            };
+        }
+        for sh in &bm.shells {
+            m.shells.push(Shell { nodes: sh.nodes.iter().map(|&n| map[n]).collect(), mat: sh.mat });
+        }
+        for b in &bm.beams {
+            m.beams.push(crate::fem::Beam { n1: map[b.n1], n2: map[b.n2], ..b.clone() });
+        }
+        for sp in &bm.springs {
+            if !iface.contains_key(&sp.node) {
+                m.springs.push(crate::fem::Spring { node: map[sp.node], k: sp.k });
+            }
+        }
+        let mut gs: Vec<usize> = iface.values().copied().collect();
+        gs.sort_unstable();
+        gs.dedup();
+        for g in gs {
+            m.fixed.push((g, [true, true, false, false, false, true]));
+        }
+        // Сваи: группа пружин с жёсткостью, обратной податливости варианта.
+        let np = v.piles.len();
+        m.spring_groups.push(crate::fem::SpringGroup { nodes: v.piles.clone(), k: invert(&v.pile_flex, np)? });
+        let cases: Vec<LoadCase> = lm
+            .raft_cases
+            .iter()
+            .zip(&lm.building_cases)
+            .map(|(r, b)| LoadCase { nodal: r.nodal.iter().copied().chain(b.nodal.iter().map(|&(n, f)| (map[n], f))).collect(), pressure: vec![] })
+            .collect();
+        // Подземные пластины здания и группы по толщине.
+        let r = &input.raft;
+        let cc = concrete(&r.concrete)?;
+        let rc = rebar(&r.rebar)?;
+        let (c_uls, r_uls) = (cc.chars(CalcType::Uls), rc.chars(CalcType::Uls));
+        let (c_sls, r_sls) = (cc.chars(CalcType::Sls), rc.chars(CalcType::Sls));
+        let under: Vec<bool> = (0..m.shells.len()).map(|e| e >= raft_shells && m.shells[e].nodes.iter().all(|&n| m.nodes[n][2] <= lm.ground + 1e-6)).collect();
+        let mut hs: Vec<f64> = (0..m.shells.len()).filter(|&e| under[e]).map(|e| (m.shells[e].mat.h * 1000.0).round() / 1000.0).collect();
+        hs.sort_by(|a, b| a.total_cmp(b));
+        hs.dedup();
+        if hs.is_empty() {
+            return Err(format!("нет пластин здания ниже поверхности грунта (отметка {:.2})", lm.ground));
+        }
+        let secs: Vec<PlateSection> = hs.iter().map(|&h| PlateSection { h, a_top: r.cover, a_bot: r.cover, ds_x: r.bar_d, ds_y: r.bar_d, concrete_diagram: ConcreteDiagramType::L3 }).collect();
+        let ulss: Vec<UlsContext> = secs.iter().map(|s| UlsContext::new(s, &c_uls, &r_uls)).collect();
+        let crack = |lim: f64, s: &PlateSection| (lim > 0.0).then(|| SlsContext::new(s, &c_sls, &r_sls, Some((&c_uls, &r_uls)), SlsOptions { acrc_lim_mm: lim, phi1: 1.4, ..Default::default() }));
+        let cl: Vec<Option<SlsContext>> = secs.iter().map(|s| crack(input.acrc_long, s)).collect();
+        let cs: Vec<Option<SlsContext>> = secs.iter().map(|s| crack(input.acrc_short, s)).collect();
+        let groups: Vec<crate::reinforce::Group> = (0..secs.len())
+            .map(|g| crate::reinforce::Group {
+                section: secs[g].clone(),
+                concrete: c_uls.clone(),
+                rebar: r_uls.clone(),
+                rsw: rc.rsw(),
+                uls: &ulss[g],
+                crack_short: cs[g].as_ref(),
+                crack_long: cl[g].as_ref(),
+                background: [0.0; 4],
+            })
+            .collect();
+        let group_of: Vec<Option<usize>> = (0..m.shells.len())
+            .map(|e| under[e].then(|| hs.iter().position(|&h| (h - (m.shells[e].mat.h * 1000.0).round() / 1000.0).abs() < 1e-9).unwrap()))
+            .collect();
+        progress("армирование подземной части");
+        let out = crate::reinforce::design(&m, &groups, &group_of, &cases, &lm.combos.uls, &lm.combos.sls, Some(&lm.combos.sls_long))?;
+        // Масса: продольная — Σ площадей на метр × площадь элемента; поперечная — Asw/sw × площадь × h.
+        let (mut kg, mut vol, mut n, mut impossible, mut strip, mut asw_max) = (0.0, 0.0, 0usize, 0usize, 0usize, 0.0f64);
+        let mut fields = vec![[0.0; 4]; m.shells.len()];
+        for e in 0..m.shells.len() {
+            if !under[e] {
+                continue;
+            }
+            let c: Vec<crate::fem::V3> = m.shells[e].nodes.iter().map(|&k| m.nodes[k]).collect();
+            let a = shell_area3(&c);
+            let h = m.shells[e].mat.h;
+            let el = &out[e];
+            kg += (el.required.iter().sum::<f64>() * a + el.asw * a * h) * 7850.0;
+            vol += a * h;
+            n += 1;
+            impossible += el.impossible as usize;
+            strip += el.strip_fails as usize;
+            asw_max = asw_max.max(el.asw);
+            fields[e] = el.required;
+        }
+        let mx: Vec<f64> = (0..4).map(|k| fields.iter().map(|f| f[k] * 1e4).fold(0.0, f64::max)).collect();
+        let summary = json!({
+            "variant": i, "elements": n, "ground": lm.ground, "kg": kg, "kg_m3": kg / vol.max(1e-9), "volume": vol,
+            "impossible": impossible, "strip_fails": strip, "asw_max": asw_max, "thicknesses": hs,
+            "max": mx,
+        });
+        self.last_underground = Some((m, fields));
+        Ok(summary)
+    }
+}
+
+fn shell_area3(p: &[crate::fem::V3]) -> f64 {
+    let mut s = [0.0; 3];
+    for k in 1..p.len() - 1 {
+        let (u, v) = ([p[k][0] - p[0][0], p[k][1] - p[0][1], p[k][2] - p[0][2]], [p[k + 1][0] - p[0][0], p[k + 1][1] - p[0][1], p[k + 1][2] - p[0][2]]);
+        let c = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        (0..3).for_each(|i| s[i] += c[i]);
+    }
+    (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt() / 2.0
+}
+
+/// Обращение симметричной положительно определённой матрицы n × n (Гаусс — Жордан).
+fn invert(a: &[f64], n: usize) -> Result<Vec<f64>, String> {
+    let mut m = a.to_vec();
+    let mut inv = vec![0.0; n * n];
+    (0..n).for_each(|i| inv[i * n + i] = 1.0);
+    for c in 0..n {
+        let p = (c..n).max_by(|&x, &y| m[x * n + c].abs().total_cmp(&m[y * n + c].abs())).unwrap();
+        if m[p * n + c].abs() < 1e-300 {
+            return Err("матрица податливости свай вырождена".into());
+        }
+        for k in 0..n {
+            m.swap(c * n + k, p * n + k);
+            inv.swap(c * n + k, p * n + k);
+        }
+        let d = m[c * n + c];
+        for k in 0..n {
+            m[c * n + k] /= d;
+            inv[c * n + k] /= d;
+        }
+        for r in 0..n {
+            if r != c {
+                let f = m[r * n + c];
+                if f != 0.0 {
+                    for k in 0..n {
+                        m[r * n + k] -= f * m[c * n + k];
+                        inv[r * n + k] -= f * inv[c * n + k];
+                    }
+                }
+            }
+        }
+    }
+    Ok(inv)
 }

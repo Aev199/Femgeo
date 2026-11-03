@@ -205,6 +205,8 @@ pub struct Evaluation {
     pub util_punch_struct: f64,
     /// Поперечная арматура продавливания, кг/м³ плиты (включена в `kg_m3`).
     pub punch_kg_m3: f64,
+    /// Матрица податливости свай варианта (м/кН, n × n построчно) — для полной модели.
+    pub pile_flex: Vec<f64>,
     /// Определяющая конструкция: вид, точка, сила F (кН, за вычетом свай), предел Rbt·u·h0 (кН).
     pub punch_struct_worst: Option<(String, [f64; 2], f64, f64)>,
     /// Среднее расстояние от свай до ближайшей существующей сваи, м (NaN — ориентира нет).
@@ -287,8 +289,12 @@ impl Problem<'_> {
         }
         let w0: Vec<Vec<f64>> = p.u0.iter().map(|u0| piles.iter().map(|&n| at(u0, n)).collect()).collect();
         let mut conditional = None;
+        let mut pile_flex = vec![0.0; np * np];
         let a: Vec<f64> = match (&field, &self.conditional) {
-            (Some(f), _) => f.flexibility.iter().zip(&gss).map(|(x, y)| x + y).collect(),
+            (Some(f), _) => {
+                pile_flex = f.flexibility.clone();
+                f.flexibility.iter().zip(&gss).map(|(x, y)| x + y).collect()
+            }
             (None, Some(cm)) => {
                 // Суммарные нагрузки загружений — из равновесия при любой одинаковой жёсткости.
                 let probe = 1e-5;
@@ -306,6 +312,7 @@ impl Problem<'_> {
                 conditional = Some(cf);
                 let mut a = gss.clone();
                 (0..np).for_each(|i| a[i * np + i] += flex);
+                (0..np).for_each(|i| pile_flex[i * np + i] = flex);
                 a
             }
             (None, None) => unreachable!(),
@@ -661,6 +668,7 @@ impl Problem<'_> {
             util_punch_struct,
             punch_struct_worst,
             punch_kg_m3,
+            pile_flex,
             shift,
             piles: piles.to_vec(),
             pile_n,
