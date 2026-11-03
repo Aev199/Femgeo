@@ -1036,6 +1036,34 @@ impl Service {
             .collect();
         progress("армирование подземной части");
         let out = crate::reinforce::design(&m, &groups, &group_of, &cases, &lm.combos.uls, &lm.combos.sls, Some(&lm.combos.sls_long))?;
+        // Особые точки МКЭ (опирание стен и колонн на плиту): требуемая продольная арматура
+        // осредняется по площади элементов той же толщины в радиусе h от центра элемента (допущение;
+        // сырые максимумы — в сводке «raw_max»).
+        let cent: Vec<crate::fem::V3> = m.shells.iter().map(|sh| {
+            let k = sh.nodes.len() as f64;
+            sh.nodes.iter().fold([0.0; 3], |a, &n| [a[0] + m.nodes[n][0] / k, a[1] + m.nodes[n][1] / k, a[2] + m.nodes[n][2] / k])
+        }).collect();
+        let areas: Vec<f64> = m.shells.iter().map(|sh| shell_area3(&sh.nodes.iter().map(|&k| m.nodes[k]).collect::<Vec<_>>())).collect();
+        let raw: Vec<[f64; 4]> = out.iter().map(|e| e.required).collect();
+        let idx: Vec<usize> = (0..m.shells.len()).filter(|&e| under[e]).collect();
+        let smooth: Vec<[f64; 4]> = (0..m.shells.len())
+            .map(|e| {
+                if !under[e] {
+                    return [0.0; 4];
+                }
+                let h = m.shells[e].mat.h;
+                let (mut acc, mut w) = ([0.0; 4], 0.0);
+                for &j in &idx {
+                    let d2 = (0..3).map(|k| (cent[j][k] - cent[e][k]).powi(2)).sum::<f64>();
+                    if d2 <= h * h && (m.shells[j].mat.h - h).abs() < 1e-6 {
+                        (0..4).for_each(|k| acc[k] += raw[j][k] * areas[j]);
+                        w += areas[j];
+                    }
+                }
+                acc.map(|x| x / w.max(1e-12))
+            })
+            .collect();
+        let raw_max: Vec<f64> = (0..4).map(|k| raw.iter().map(|f| f[k] * 1e4).fold(0.0, f64::max)).collect();
         // Масса: продольная — Σ площадей на метр × площадь элемента; поперечная — Asw/sw × площадь × h.
         let (mut kg, mut vol, mut n, mut impossible, mut strip, mut asw_max) = (0.0, 0.0, 0usize, 0usize, 0usize, 0.0f64);
         let mut fields = vec![[0.0; 4]; m.shells.len()];
@@ -1047,13 +1075,13 @@ impl Service {
             let a = shell_area3(&c);
             let h = m.shells[e].mat.h;
             let el = &out[e];
-            kg += (el.required.iter().sum::<f64>() * a + el.asw * a * h) * 7850.0;
+            kg += (smooth[e].iter().sum::<f64>() * a + el.asw * a * h) * 7850.0;
             vol += a * h;
             n += 1;
             impossible += el.impossible as usize;
             strip += el.strip_fails as usize;
             asw_max = asw_max.max(el.asw);
-            fields[e] = el.required;
+            fields[e] = smooth[e];
         }
         let mx: Vec<f64> = (0..4).map(|k| fields.iter().map(|f| f[k] * 1e4).fold(0.0, f64::max)).collect();
         let diag = {
@@ -1079,6 +1107,7 @@ impl Service {
             "variant": i, "elements": n, "ground": lm.ground, "kg": kg, "kg_m3": kg / vol.max(1e-9), "volume": vol,
             "impossible": impossible, "strip_fails": strip, "asw_max": asw_max, "thicknesses": hs,
             "max": mx,
+            "raw_max": raw_max,
             "worst": { "x": wc[0], "y": wc[1], "z": wc[2], "h": m.shells[worst].mat.h, "as": fields[worst].map(|x| x * 1e4), "diag": diag },
         });
         self.last_underground = Some((m, fields));
