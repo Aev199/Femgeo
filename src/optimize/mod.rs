@@ -277,8 +277,9 @@ impl Problem<'_> {
         self.evaluate_with(piles, true, Some(flex))
     }
 
-    /// Нелинейное основание (SPEC 4.1, этап 3): секущая податливость по осадкам `settle` (м)
-    /// под нагрузками ПС2 с наибольшей осадкой. F' = F + diag(δ), δ_i = (s_нл,i − (F·N)_i)/N_i —
+    /// Нелинейное основание (SPEC 4.1, этап 3): секущая податливость по отношениям осадок
+    /// `settle` (D_i = s_нл/s_упр на одной сетке) под нагрузками ПС2 с наибольшей осадкой;
+    /// s_нл,i = D_i·(F·N)_i. F' = F + diag(δ), δ_i = (s_нл,i − (F·N)_i)/N_i —
     /// нелинейность у ствола и острия своей сваи, взаимовлияние — упругое (F'·N = s_нл); плита
     /// пересчитывается с F', пока нагрузки на сваи не изменятся меньше чем на `tol` (доля
     /// наибольшей), не более `max_iter` раз. Несходимость — ошибка (результат не определён).
@@ -287,14 +288,14 @@ impl Problem<'_> {
         let mut e = self.evaluate_flex(piles, f_lin)?;
         for it in 1..=max_iter {
             let load = e.pile_n_sls.clone();
-            let s_nl = settle(&load)?;
+            let ratio = settle(&load)?;
             let mut f = f_lin.to_vec();
             let mut d = vec![1.0; n];
             for i in 0..n {
                 let s_lin: f64 = (0..n).map(|j| f_lin[i * n + j] * load[j]).sum();
-                if load[i] > 1e-6 && s_lin > 0.0 {
-                    d[i] = s_nl[i] / s_lin;
-                    f[i * n + i] += ((s_nl[i] - s_lin) / load[i]).max(-0.5 * f_lin[i * n + i]);
+                if load[i] > 1e-6 && s_lin > 0.0 && ratio[i].is_finite() {
+                    d[i] = ratio[i];
+                    f[i * n + i] += ((ratio[i] - 1.0) * s_lin / load[i]).max(-0.5 * f_lin[i * n + i]);
                 }
             }
             let mut next = self.evaluate_flex(piles, &f)?;

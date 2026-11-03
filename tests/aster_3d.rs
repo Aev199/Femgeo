@@ -197,7 +197,7 @@ fn nonlinear_coupling_model_law() {
     let mut calls = 0;
     let mut settle = |load: &[f64]| -> Result<Vec<f64>, String> {
         calls += 1;
-        Ok((0..n).map(|i| (0..n).map(|j| f[i * n + j] * load[j]).sum::<f64>() * (1.0 + load[i] / nu)).collect())
+        Ok((0..n).map(|i| 1.0 + load[i] / nu).collect())
     };
     let (e, it) = p.refine_nonlinear(&grid, &f, &mut settle, 0.01, 10).unwrap();
     let e1 = p.evaluate_flex(&grid, &f).unwrap();
@@ -207,7 +207,8 @@ fn nonlinear_coupling_model_law() {
     assert!(corner_ratio(&p, &grid, &e) < corner_ratio(&p, &grid, &e1));
     assert!(e.s_max > e1.s_max);
     // Неподвижная точка: осадки свай в модели равны закону при своих нагрузках.
-    let s_law = settle(&e.pile_n_sls).unwrap();
+    let r = settle(&e.pile_n_sls).unwrap();
+    let s_law: Vec<f64> = (0..n).map(|i| (0..n).map(|j| f[i * n + j] * e.pile_n_sls[j]).sum::<f64>() * r[i]).collect();
     for (k, &node) in grid.iter().enumerate() {
         assert!((e.w_nodes[node] - s_law[k]).abs() < 0.02 * s_law[k], "свая {k}: {} / {}", e.w_nodes[node], s_law[k]);
     }
@@ -233,7 +234,7 @@ fn raft_on_nonlinear_soil() {
         let r = aster::settlements_nl(&ps, &soil_nl, load, 10, &o)?;
         t += r.seconds;
         assert!(r.complete, "срыв");
-        Ok(r.s)
+        Ok(r.s.iter().zip(&r.s_el).map(|(a, b)| a / b).collect())
     };
     let (e, it) = p.refine_nonlinear(&grid, &f.flexibility, &mut settle, 0.02, 6).unwrap();
     let (lo, hi) = e.nl_factor.iter().fold((f64::MAX, 0.0f64), |a, &d| (a.0.min(d), a.1.max(d)));

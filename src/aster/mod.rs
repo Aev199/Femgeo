@@ -34,6 +34,9 @@ pub struct Options {
     pub below: f64,
     /// Квадратичные элементы (HEXA20): сходимость по сетке заметно лучше HEXA8.
     pub quadratic: bool,
+    /// Квадратичные элементы в нелинейном расчёте (по умолчанию да: HEXA8 «запирается» при
+    /// пластическом течении без изменения объёма — D одиночной сваи 1,10 против 1,49).
+    pub quadratic_nl: bool,
     pub ncpus: usize,
     pub memory_mb: usize,
     pub time_limit_s: usize,
@@ -57,7 +60,7 @@ impl Options {
         let b = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(0.0);
         let l = piles.iter().map(|p| p.length).fold(0.0, f64::max);
         let r = l.max(b);
-        Self { run_aster, workdir, h: 1.0, hz: 2.0, grade: 1.3, lateral: r, below: r, quadratic: true, ncpus: 4, memory_mb: 12_000, time_limit_s: 7200 }
+        Self { run_aster, workdir, h: 1.0, hz: 2.0, grade: 1.3, lateral: r, below: r, quadratic: true, quadratic_nl: true, ncpus: 4, memory_mb: 12_000, time_limit_s: 7200 }
     }
 }
 
@@ -392,6 +395,8 @@ fn comm_head(g: &Grid, quadratic: bool, nl: bool) -> Result<String, String> {
 }
 
 const G: f64 = 9.81;
+/// Допуск невязки (доля нагрузки); 1e-4 с начальной матрицей занижает D на 2 %.
+const NL_RESI: f64 = 1e-5;
 /// Наименьшее сцепление, кПа (допущение для сходимости у поверхности).
 const MC_C_MIN: f64 = 1.0;
 
@@ -427,7 +432,7 @@ pub fn comm_nl(g: &Grid, loads: &[f64], steps: usize, out: &Path, quadratic: boo
     let mut s = comm_head(g, quadratic, true)?;
     let n: Vec<String> = loads.iter().map(|v| format!("{v:e}")).collect();
     let _ = writeln!(s, "N = [{}]", n.join(", "));
-    let _ = writeln!(s, "G = {G}\nSTEPS = {steps}\nOUT = '{}'", out.display());
+    let _ = writeln!(s, "G = {G}\nSTEPS = {steps}\nRESI = {NL_RESI:e}\nOUT = '{}'", out.display());
     s.push_str(
         r#"grav = AFFE_CHAR_MECA(MODELE=mod, PESANTEUR=_F(GRAVITE=G, DIRECTION=(0.0, 0.0, -1.0)))
 load = AFFE_CHAR_MECA(MODELE=mod, FORCE_NODALE=[_F(GROUP_NO='H%d' % p, FZ=-N[p] / len(h)) for p, h in enumerate(heads)])
@@ -441,21 +446,26 @@ LI = DEFI_LIST_INST(DEFI_LIST=_F(LIST_INST=L), ECHEC=_F(ACTION='DECOUPE', SUBD_N
 comp = [_F(GROUP_MA=tuple(soil_groups), RELATION='MOHR_COULOMB')]
 if pile_groups:
     comp.append(_F(GROUP_MA=tuple(pile_groups), RELATION='ELAS'))
+# Упругое решение на той же сетке (для отношения s_нл/s_упр, не зависящего от сетки).
+rl = MECA_STATIQUE(MODELE=mod, CHAM_MATER=cm, EXCIT=(_F(CHARGE=bc), _F(CHARGE=load)), SOLVEUR=_F(METHODE='MUMPS'))
+sfl = rl.getField('DEPL', rl.getLastIndex()).toSimpleFieldOnNodes()
+vl = np.array(sfl.toNumpy()[0], copy=True)
+izl = list(sfl.getComponents()).index('DZ')
+rows = [[-1.0] + [-np.mean(vl[h, izl]) for h in heads]]
 from libaster import AsterError
 kw = dict(MODELE=mod, CHAM_MATER=cm, EXCIT=(_F(CHARGE=bc), _F(CHARGE=grav), _F(CHARGE=load, FONC_MULT=ramp)),
-    COMPORTEMENT=comp, NEWTON=_F(MATRICE='TANGENTE', REAC_ITER=1, PREDICTION='ELASTIQUE'),
-    CONVERGENCE=_F(RESI_GLOB_RELA=1e-5, ITER_GLOB_MAXI=25), SOLVEUR=_F(METHODE='MUMPS'))
-# По шагам: при несходимости сохраняются пройденные (результат дальше не определён).
+    COMPORTEMENT=comp, NEWTON=_F(MATRICE='ELASTIQUE', REAC_INCR=0, REAC_ITER=0),
+    CONVERGENCE=_F(RESI_GLOB_RELA=RESI, ITER_GLOB_MAXI=300), SOLVEUR=_F(METHODE='MUMPS'))
+# Первый шаг, затем остальные одним вызовом (reuse): при несходимости пройденные шаги
+# остаются в res (результат дальше не определён). Матрица — начальная упругая (одно
+# разложение на вызов, симметричная): у срыва сходится надёжнее касательной.
 res = None
-for k in range(1, STEPS + 1):
-    try:
-        if res is None:
-            res = STAT_NON_LINE(ETAT_INIT=_F(SIGM=sig0), INCREMENT=_F(LIST_INST=LI, INST_INIT=1.0, INST_FIN=1.0 + k / STEPS), **kw)
-        else:
-            res = STAT_NON_LINE(reuse=res, RESULTAT=res, ETAT_INIT=_F(EVOL_NOLI=res), INCREMENT=_F(LIST_INST=LI, INST_FIN=1.0 + k / STEPS), **kw)
-    except AsterError:
-        break
-rows = []
+try:
+    res = STAT_NON_LINE(ETAT_INIT=_F(SIGM=sig0), INCREMENT=_F(LIST_INST=LI, INST_INIT=1.0, INST_FIN=1.0 + 1.0 / STEPS), **kw)
+    if STEPS > 1:
+        res = STAT_NON_LINE(reuse=res, RESULTAT=res, ETAT_INIT=_F(EVOL_NOLI=res), INCREMENT=_F(LIST_INST=LI, INST_FIN=2.0), **kw)
+except AsterError:
+    pass
 for idx in (res.getIndexes() if res is not None else []):
     sf = res.getField('DEPL', idx).toSimpleFieldOnNodes()
     iz = list(sf.getComponents()).index('DZ')
@@ -517,6 +527,8 @@ pub struct Nonlinear {
     /// Осадки на последнем сошедшемся шаге, м; `complete` — дошёл до полной нагрузки (иначе
     /// результат при полной нагрузке не определён: срыв или несходимость).
     pub s: Vec<f64>,
+    /// Упругие осадки под теми же силами на той же сетке, м.
+    pub s_el: Vec<f64>,
     pub complete: bool,
     /// Кривая: доля нагрузки и осадки по шагам.
     pub curve: Vec<(f64, Vec<f64>)>,
@@ -530,16 +542,17 @@ pub fn settlements_nl(piles: &[Pile], soil: &dyn Fn(f64, f64) -> SoilColumn, loa
         return Err("число сил не равно числу свай".into());
     }
     let g = grid_with(piles, soil, o, true)?;
-    let (text, seconds) = execute(o, &g, &|out| comm_nl(&g, loads, steps.max(1), out, o.quadratic), "settle.txt", false)?;
+    let (text, seconds) = execute(o, &g, &|out| comm_nl(&g, loads, steps.max(1), out, o.quadratic_nl), "settle.txt", false)?;
     let v = numbers(&text)?;
     let n = piles.len();
-    if v.len() % (n + 1) != 0 || v.len() < 2 * (n + 1) {
+    if v.len() % (n + 1) != 0 || v.len() < 3 * (n + 1) {
         return Err("нелинейный расчёт не сошёлся на первом шаге — результат не определён".into());
     }
-    let curve: Vec<(f64, Vec<f64>)> = v.chunks(n + 1).map(|r| (r[0] - 1.0, r[1..].to_vec())).collect();
+    let s_el = v[1..n + 1].to_vec();
+    let curve: Vec<(f64, Vec<f64>)> = v[n + 1..].chunks(n + 1).map(|r| (r[0] - 1.0, r[1..].to_vec())).collect();
     let last = curve.last().unwrap();
     let complete = (last.0 - 1.0).abs() < 1e-6 && last.1.iter().all(|x| x.is_finite());
-    Ok(Nonlinear { s: last.1.clone(), complete, curve, seconds })
+    Ok(Nonlinear { s: last.1.clone(), s_el, complete, curve, seconds })
 }
 
 /// Результат: матрица податливости и сведения о модели.

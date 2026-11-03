@@ -701,7 +701,7 @@ impl Service {
                         if !r.complete {
                             return Err(format!("нелинейное основание: срыв или несходимость на доле нагрузки {:.2} — результат не определён", r.curve.last().map_or(0.0, |c| c.0)));
                         }
-                        Ok(r.s)
+                        Ok(r.s.iter().zip(&r.s_el).map(|(a, b)| a / b).collect())
                     };
                     problem.refine_nonlinear(&variants[i].piles, &f.flexibility, &mut settle, NL_TOL, NL_MAX_ITER)?.0
                 } else {
