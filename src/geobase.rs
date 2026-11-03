@@ -122,7 +122,7 @@ impl Object {
             let (Some(e), Some(nu)) = (s.e, s.nu) else {
                 return Err(format!("ИГЭ «{}»: в модели «{}» не заданы E и ν", s.name, self.model));
             };
-            layers.push(Layer { bottom: b.z - depth, e, nu, gamma: 0.0, phi: 0.0 });
+            layers.push(Layer { bottom: b.z - depth, e, nu, gamma: 0.0, phi: 0.0, c: 0.0 });
             top_depth = depth;
         }
         if layers.is_empty() {

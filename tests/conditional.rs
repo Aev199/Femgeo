@@ -35,7 +35,7 @@ fn offset_square() {
 /// Однородный слой: осадка по формуле послойного суммирования, независимо посчитанная здесь.
 #[test]
 fn settlement_uniform() {
-    let col = SoilColumn { top: 0.0, layers: vec![Layer { bottom: -200.0, e: 20_000.0, nu: 0.3, gamma: 20.0, phi: 20.0 }] };
+    let col = SoilColumn { top: 0.0, layers: vec![Layer { bottom: -200.0, e: 20_000.0, nu: 0.3, gamma: 20.0, phi: 20.0, c: 0.0 }] };
     let outline = [[0.0, 0.0], [20.0, 0.0], [20.0, 20.0], [0.0, 20.0]];
     let (head, l, n) = (-3.0, 15.0, 80_000.0);
     let c = settlement(&col, &outline, head, l, n).unwrap();

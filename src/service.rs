@@ -126,6 +126,10 @@ pub struct Input {
     /// с податливостью свай по 3D-основанию (Code_Aster); 0 — без пересчёта.
     #[serde(default)]
     pub refine_3d: usize,
+    /// Финалисты — на упругопластическом основании (Кулон–Мор, нужны γ, φ, c слоёв): секущая
+    /// податливость по нелинейному расчёту под нагрузками ПС2 (SPEC 4.1).
+    #[serde(default)]
+    pub refine_3d_nonlinear: bool,
 }
 
 fn acrc_long() -> f64 {
@@ -193,7 +197,7 @@ fn rebar(name: &str) -> Result<RebarClass, String> {
 
 impl Serialize for Layer {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        json!({ "bottom": self.bottom, "e": self.e, "nu": self.nu, "gamma": self.gamma, "phi": self.phi }).serialize(s)
+        json!({ "bottom": self.bottom, "e": self.e, "nu": self.nu, "gamma": self.gamma, "phi": self.phi, "c": self.c }).serialize(s)
     }
 }
 
@@ -208,9 +212,11 @@ impl<'de> Deserialize<'de> for Layer {
             gamma: f64,
             #[serde(default)]
             phi: f64,
+            #[serde(default)]
+            c: f64,
         }
         let l = L::deserialize(d)?;
-        Ok(Layer { bottom: l.bottom, e: l.e, nu: l.nu, gamma: l.gamma, phi: l.phi })
+        Ok(Layer { bottom: l.bottom, e: l.e, nu: l.nu, gamma: l.gamma, phi: l.phi, c: l.c })
     }
 }
 
@@ -277,6 +283,11 @@ fn plane_fix(m: &mut Model) {
 fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)
 }
+
+/// Нелинейное основание: шагов нагрузки, допуск по нагрузкам на сваи, наибольшее число итераций.
+const NL_STEPS: usize = 10;
+const NL_TOL: f64 = 0.02;
+const NL_MAX_ITER: usize = 6;
 
 #[derive(Default)]
 pub struct Service {
@@ -681,7 +692,21 @@ impl Service {
                 let ps = problem.piles_of(&variants[i].piles);
                 let o = crate::aster::Options::new(exe.clone(), std::env::temp_dir().join(format!("femgeo_aster_{}_{k}", std::process::id())), &ps);
                 let f = crate::aster::flexibility(&ps, soil.as_ref(), &o)?;
-                let e = problem.evaluate_flex(&variants[i].piles, &f.flexibility)?;
+                let e = if input.refine_3d_nonlinear {
+                    let mut run = 0;
+                    let mut settle = |n: &[f64]| -> Result<Vec<f64>, String> {
+                        run += 1;
+                        progress(&format!("3D-основание: нелинейный расчёт, итерация {run}"));
+                        let r = crate::aster::settlements_nl(&ps, soil.as_ref(), n, NL_STEPS, &o)?;
+                        if !r.complete {
+                            return Err(format!("нелинейное основание: срыв или несходимость на доле нагрузки {:.2} — результат не определён", r.curve.last().map_or(0.0, |c| c.0)));
+                        }
+                        Ok(r.s)
+                    };
+                    problem.refine_nonlinear(&variants[i].piles, &f.flexibility, &mut settle, NL_TOL, NL_MAX_ITER)?.0
+                } else {
+                    problem.evaluate_flex(&variants[i].piles, &f.flexibility)?
+                };
                 variants.push(e);
             }
         }
@@ -795,6 +820,7 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bo
             "design_impossible": v.design_impossible,
             "capped": v.capped,
             "soil_3d": v.soil_3d,
+            "nl_factor": v.nl_factor,
             "capped_share": v.capped_share,
             "conditional": v.conditional.as_ref().map(|c| json!({ "s": c.s, "p": c.p, "area": c.area, "phi_mt": c.phi_mt, "hc": c.hc })),
             "piles": v.piles.iter().zip(&v.pile_n).map(|(&n, &f)| json!({ "x": raft.nodes[n][0], "y": raft.nodes[n][1], "n": f })).collect::<Vec<_>>(),
@@ -867,7 +893,7 @@ pub fn default_input() -> Input {
         region: None,
         soil: SoilInput::Layers {
             top: 0.0,
-            layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }],
+            layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }],
         },
         s_max: 0.15,
         ds_rel: 0.002,
@@ -879,6 +905,7 @@ pub fn default_input() -> Input {
         pile_fu: None,
         pile_model: sp24(),
         refine_3d: 0,
+        refine_3d_nonlinear: false,
     }
 }
 

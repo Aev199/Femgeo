@@ -199,6 +199,11 @@ pub struct Evaluation {
     pub rebar: Vec<[f64; 4]>,
     /// Осадка узлов плиты в сочетании с наибольшей осадкой, м (вниз — положительная).
     pub w_nodes: Vec<f64>,
+    /// Нагрузки на сваи в этом сочетании (ПС2 с наибольшей осадкой), кН, сжатие > 0.
+    pub pile_n_sls: Vec<f64>,
+    /// Нелинейный грунт (этап 3): отношение осадок каждой сваи D_i = s_нл/s_лин
+    /// (пусто — линейный расчёт).
+    pub nl_factor: Vec<f64>,
     /// Наибольший Кисп продавливания плиты сваей (0 — не проверялось).
     pub util_punch: f64,
     /// Наибольший Кисп продавливания плиты колоннами, торцами и углами стен (0 — не проверялось).
@@ -270,6 +275,38 @@ impl Problem<'_> {
             return Err("размер матрицы податливости не равен числу свай в квадрате".into());
         }
         self.evaluate_with(piles, true, Some(flex))
+    }
+
+    /// Нелинейное основание (SPEC 4.1, этап 3): секущая податливость по осадкам `settle` (м)
+    /// под нагрузками ПС2 с наибольшей осадкой. F' = F + diag(δ), δ_i = (s_нл,i − (F·N)_i)/N_i —
+    /// нелинейность у ствола и острия своей сваи, взаимовлияние — упругое (F'·N = s_нл); плита
+    /// пересчитывается с F', пока нагрузки на сваи не изменятся меньше чем на `tol` (доля
+    /// наибольшей), не более `max_iter` раз. Несходимость — ошибка (результат не определён).
+    pub fn refine_nonlinear(&self, piles: &[usize], f_lin: &[f64], settle: &mut dyn FnMut(&[f64]) -> Result<Vec<f64>, String>, tol: f64, max_iter: usize) -> Result<(Evaluation, usize), String> {
+        let n = piles.len();
+        let mut e = self.evaluate_flex(piles, f_lin)?;
+        for it in 1..=max_iter {
+            let load = e.pile_n_sls.clone();
+            let s_nl = settle(&load)?;
+            let mut f = f_lin.to_vec();
+            let mut d = vec![1.0; n];
+            for i in 0..n {
+                let s_lin: f64 = (0..n).map(|j| f_lin[i * n + j] * load[j]).sum();
+                if load[i] > 1e-6 && s_lin > 0.0 {
+                    d[i] = s_nl[i] / s_lin;
+                    f[i * n + i] += ((s_nl[i] - s_lin) / load[i]).max(-0.5 * f_lin[i * n + i]);
+                }
+            }
+            let mut next = self.evaluate_flex(piles, &f)?;
+            next.nl_factor = d;
+            let scale = load.iter().fold(0.0f64, |a, x| a.max(x.abs())).max(1e-9);
+            let change = load.iter().zip(&next.pile_n_sls).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / scale;
+            e = next;
+            if change < tol {
+                return Ok((e, it));
+            }
+        }
+        Err(format!("нелинейное основание: нагрузки на сваи не сошлись за {max_iter} итераций — результат не определён"))
     }
 
     /// Сваи варианта для внешних моделей (координаты узлов плиты, тип сваи задачи).
@@ -584,12 +621,14 @@ impl Problem<'_> {
         }
         // ПС2: осадки и разность осадок; непродолжительное раскрытие трещин.
         let settle = if self.sls.is_empty() { &self.uls } else { &self.sls };
+        let mut pile_n_sls = vec![0.0; np];
         for c in settle {
-            let (u, _) = solve(c)?;
+            let (u, nn) = solve(c)?;
             let w: Vec<f64> = piles.iter().map(|&n| u[6 * n + 2]).collect();
             let s_lc = w.iter().map(|x| -x).fold(0.0, f64::max);
             if s_lc >= s_max {
                 w_nodes = (0..m.nodes.len()).map(|n| -u[6 * n + 2]).collect();
+                pile_n_sls = nn;
             }
             for i in 0..np {
                 s_max = s_max.max(-w[i]);
@@ -698,6 +737,8 @@ impl Problem<'_> {
             kg_m3,
             rebar: env,
             w_nodes,
+            pile_n_sls,
+            nl_factor: vec![],
             design_impossible: impossible,
             capped: capped_any,
             capped_share,

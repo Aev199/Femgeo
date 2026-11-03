@@ -4,7 +4,7 @@ use femgeo::aster::{self, Options};
 use femgeo::piles::{Layer, Pile, SoilColumn};
 
 fn soil(_: f64, _: f64) -> SoilColumn {
-    SoilColumn { top: -10.85, layers: vec![Layer { bottom: -20.0, e: 20_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -200.0, e: 45_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] }
+    SoilColumn { top: -10.85, layers: vec![Layer { bottom: -20.0, e: 20_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }, Layer { bottom: -200.0, e: 45_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }] }
 }
 
 fn main() {

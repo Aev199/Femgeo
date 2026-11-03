@@ -10,11 +10,11 @@ use femgeo::sp63::capra_maury::{PlateSection, UlsContext};
 use femgeo::sp63::materials::{CalcType, ConcreteClass, ConcreteDiagramType, RebarClass};
 
 fn uniform(_: f64, _: f64) -> SoilColumn {
-    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -100.0, e: 20_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] }
+    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -100.0, e: 20_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }] }
 }
 
 fn layered(_: f64, _: f64) -> SoilColumn {
-    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] }
+    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }] }
 }
 
 fn pile(x: f64, y: f64, d: f64, l: f64) -> Pile {
@@ -36,7 +36,7 @@ fn grid_geometry() {
     let (nx, ny) = (g.x.len() - 1, g.y.len() - 1);
     for (e, &m) in g.mat.iter().enumerate() {
         let (i, j, k) = (e % nx, (e / nx) % ny, e / (nx * ny));
-        if m < 2 && g.materials[m].0 > 1e6 {
+        if m != aster::VOID && g.materials[m].pile {
             v += (g.x[i + 1] - g.x[i]) * (g.y[j + 1] - g.y[j]) * (g.z[k + 1] - g.z[k]);
         }
     }
@@ -88,18 +88,15 @@ fn raft(a: f64, n: usize) -> Model {
     m
 }
 
-#[test]
-fn raft_on_3d_soil() {
-    let Some(exe) = Options::find_run_aster() else {
-        println!("Code_Aster не найден — пропуск");
-        return;
-    };
-    const A: f64 = 12.0;
-    const Q: f64 = 300.0;
+const A: f64 = 12.0;
+const Q: f64 = 300.0;
+
+/// Плита 12 × 12 м, q = 300 кПа, сваи d 0,6, L 15, и сетка свай 4 × 4 с шагом 3 м.
+fn problem(soil: &'static (dyn Fn(f64, f64) -> SoilColumn + Sync)) -> (Problem<'static>, Vec<usize>) {
     let d = 0.6;
     let (c, r) = (ConcreteClass::B25.chars(CalcType::Uls), RebarClass::A500.chars(CalcType::Uls));
     let sec = PlateSection { h: 0.8, a_top: 0.05, a_bot: 0.05, ds_x: 0.016, ds_y: 0.016, concrete_diagram: ConcreteDiagramType::L3 };
-    let design = UlsContext::new(&sec, &c, &r);
+    let design: &'static UlsContext = Box::leak(Box::new(UlsContext::new(&sec, &c, &r)));
     let m = raft(A, 12);
     let lc = LoadCase { pressure: (0..m.shells.len()).map(|s| (s, -Q)).collect(), ..Default::default() };
     let p = Problem {
@@ -108,13 +105,13 @@ fn raft_on_3d_soil() {
         pile: PileType { length: 15.0, d, ea: 3.0e7 * std::f64::consts::PI * d * d / 4.0, fd_ground: 2_500.0, material_util_per_kn: 0.0 },
         region: Region { outer: vec![[0.0, 0.0], [A, 0.0], [A, A], [0.0, A]], holes: vec![] },
         rules: Rules::sp24(PileKind::Bored, d),
-        soil: &layered,
+        soil,
         cases: vec![lc],
         uls: vec![vec![1.0]],
         sls: vec![],
         sls_long: None,
         limits: SettlementLimits { s_max: 0.15, ds_rel_max: 0.002 },
-        design: &design,
+        design,
         rebar_axis: [1.0, 0.0, 0.0],
         raft_h: 0.8,
         building: None,
@@ -127,9 +124,24 @@ fn raft_on_3d_soil() {
         structure_punch: vec![],
         cache: Default::default(),
     };
-    // Сетка свай 4 × 4 с шагом 3 м (узлы 1, 4, 7, 10).
     let grid: Vec<usize> = p.candidates().into_iter().filter(|&k| { let q = p.raft.nodes[k]; (q[0] as i64 - 1) % 3 == 0 && (q[1] as i64 - 1) % 3 == 0 }).collect();
     assert_eq!(grid.len(), 16);
+    (p, grid)
+}
+
+fn corner_ratio(p: &Problem, grid: &[usize], e: &femgeo::optimize::Evaluation) -> f64 {
+    let i = grid.iter().position(|&k| p.raft.nodes[k][0] == 1.0 && p.raft.nodes[k][1] == 1.0).unwrap();
+    let j = grid.iter().position(|&k| p.raft.nodes[k][0] == 4.0 && p.raft.nodes[k][1] == 4.0).unwrap();
+    e.pile_n[i] / e.pile_n[j]
+}
+
+#[test]
+fn raft_on_3d_soil() {
+    let Some(exe) = Options::find_run_aster() else {
+        println!("Code_Aster не найден — пропуск");
+        return;
+    };
+    let (p, grid) = problem(&layered);
     let ps = p.piles_of(&grid);
     let o = Options::new(exe, workdir("raft"), &ps);
     let f = aster::flexibility(&ps, &layered, &o).unwrap();
@@ -140,11 +152,7 @@ fn raft_on_3d_soil() {
     let e1 = p.evaluate(&grid).unwrap();
     let sum: f64 = e3.pile_n.iter().sum();
     assert!((sum - Q * A * A).abs() < 1e-3 * Q * A * A, "Σ реакций {sum}");
-    let corner = |e: &femgeo::optimize::Evaluation| {
-        let i = grid.iter().position(|&k| p.raft.nodes[k][0] == 1.0 && p.raft.nodes[k][1] == 1.0).unwrap();
-        let j = grid.iter().position(|&k| p.raft.nodes[k][0] == 4.0 && p.raft.nodes[k][1] == 4.0).unwrap();
-        e.pile_n[i] / e.pile_n[j]
-    };
+    let corner = |e: &femgeo::optimize::Evaluation| corner_ratio(&p, &grid, e);
     let f24 = Field::new(&ps, &layered).flexibility;
     println!("СП 24: s {:.4} м, угол/центр {:.3}, F11 {:.3e}; 3D: s {:.4} м, угол/центр {:.3}, F11 {:.3e}", e1.s_max, corner(&e1), f24[0], e3.s_max, corner(&e3), f.flexibility[0]);
     // Упругое полупространство: угловые сваи нагружены больше центральных.
@@ -176,4 +184,62 @@ fn service_refine_3d() {
     assert_eq!(vs[i]["soil_3d"], true);
     s.dispatch("export_report", serde_json::json!({ "path": rp, "variant": i }), &mut |_| {}).unwrap();
     assert!(std::fs::read_to_string(&rp).unwrap().contains("3D-основании"));
+}
+
+/// Связка «плита — нелинейное основание» на модельном законе s_i = (F·N)_i·(1 + N_i/Nu):
+/// равновесие, сходимость, перераспределение с наиболее нагруженных (угловых) свай.
+#[test]
+fn nonlinear_coupling_model_law() {
+    let (p, grid) = problem(&layered);
+    let f = Field::new(&p.piles_of(&grid), &layered).flexibility;
+    let n = grid.len();
+    let nu = 5000.0;
+    let mut calls = 0;
+    let mut settle = |load: &[f64]| -> Result<Vec<f64>, String> {
+        calls += 1;
+        Ok((0..n).map(|i| (0..n).map(|j| f[i * n + j] * load[j]).sum::<f64>() * (1.0 + load[i] / nu)).collect())
+    };
+    let (e, it) = p.refine_nonlinear(&grid, &f, &mut settle, 0.01, 10).unwrap();
+    let e1 = p.evaluate_flex(&grid, &f).unwrap();
+    let sum: f64 = e.pile_n.iter().sum();
+    println!("итераций {it}, угол/центр: линейно {:.3}, нелинейно {:.3}; s {:.4} → {:.4}", corner_ratio(&p, &grid, &e1), corner_ratio(&p, &grid, &e), e1.s_max, e.s_max);
+    assert!((sum - Q * A * A).abs() < 1e-3 * Q * A * A);
+    assert!(corner_ratio(&p, &grid, &e) < corner_ratio(&p, &grid, &e1));
+    assert!(e.s_max > e1.s_max);
+    // Неподвижная точка: осадки свай в модели равны закону при своих нагрузках.
+    let s_law = settle(&e.pile_n_sls).unwrap();
+    for (k, &node) in grid.iter().enumerate() {
+        assert!((e.w_nodes[node] - s_law[k]).abs() < 0.02 * s_law[k], "свая {k}: {} / {}", e.w_nodes[node], s_law[k]);
+    }
+}
+
+/// Нелинейное основание в Code_Aster: та же плита, грунт с γ, φ, c.
+#[test]
+fn raft_on_nonlinear_soil() {
+    let Some(exe) = Options::find_run_aster() else {
+        println!("Code_Aster не найден — пропуск");
+        return;
+    };
+    fn soil_nl(_: f64, _: f64) -> SoilColumn {
+        SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 19.0, phi: 22.0, c: 15.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 19.5, phi: 30.0, c: 5.0 }] }
+    }
+    let (p, grid) = problem(&soil_nl);
+    let ps = p.piles_of(&grid);
+    let o = Options::new(exe, workdir("raft_nl"), &ps);
+    let f = aster::flexibility(&ps, &soil_nl, &o).unwrap();
+    let e1 = p.evaluate_flex(&grid, &f.flexibility).unwrap();
+    let mut t = 0.0;
+    let mut settle = |load: &[f64]| -> Result<Vec<f64>, String> {
+        let r = aster::settlements_nl(&ps, &soil_nl, load, 10, &o)?;
+        t += r.seconds;
+        assert!(r.complete, "срыв");
+        Ok(r.s)
+    };
+    let (e, it) = p.refine_nonlinear(&grid, &f.flexibility, &mut settle, 0.02, 6).unwrap();
+    let (lo, hi) = e.nl_factor.iter().fold((f64::MAX, 0.0f64), |a, &d| (a.0.min(d), a.1.max(d)));
+    println!("итераций {it}, {t:.0} с; D {lo:.3}–{hi:.3}; угол/центр {:.3} → {:.3}; s {:.4} → {:.4}", corner_ratio(&p, &grid, &e1), corner_ratio(&p, &grid, &e), e1.s_max, e.s_max);
+    let sum: f64 = e.pile_n.iter().sum();
+    assert!((sum - Q * A * A).abs() < 1e-3 * Q * A * A);
+    // Пластичность только увеличивает податливость (с точностью шага).
+    assert!(lo > 0.98, "D {lo}");
 }

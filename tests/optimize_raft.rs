@@ -35,7 +35,7 @@ fn raft() -> Model {
 }
 
 fn soil(_: f64, _: f64) -> SoilColumn {
-    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] }
+    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0, c: 0.0 }] }
 }
 
 fn material_util_per_kn(d: f64, l0: f64) -> f64 {
