@@ -122,6 +122,10 @@ pub struct Input {
     /// "conditional" — одинаковая, по осадке условного фундамента (нужны γ и φ слоёв).
     #[serde(default = "sp24")]
     pub pile_model: String,
+    /// Этап 3: число финалистов (допустимые варианты с наименьшим числом свай), пересчитываемых
+    /// с податливостью свай по 3D-основанию (Code_Aster); 0 — без пересчёта.
+    #[serde(default)]
+    pub refine_3d: usize,
 }
 
 fn acrc_long() -> f64 {
@@ -667,6 +671,20 @@ impl Service {
         progress("подбор расстановки");
         let mut report = |e: &crate::optimize::Evaluation| progress(&format!("вариант: {} свай, {:.1} кг/м³", e.piles.len(), e.kg_m3));
         let mut variants = if input.layout == "free" { problem.frontier(n_start, 8, &mut report)? } else { problem.regular(&mut report)? };
+        if input.refine_3d > 0 {
+            let exe = crate::aster::Options::find_run_aster().ok_or("3D-основание: не найден run_aster (FEMGEO_ASTER)")?;
+            let mut fin: Vec<usize> = (0..variants.len()).filter(|&i| variants[i].feasible).collect();
+            fin.sort_by(|&a, &b| variants[a].piles.len().cmp(&variants[b].piles.len()).then(variants[a].kg_m3.total_cmp(&variants[b].kg_m3)));
+            fin.truncate(input.refine_3d.min(3));
+            for (k, &i) in fin.iter().enumerate() {
+                progress(&format!("3D-основание: финалист {} из {} ({} свай)", k + 1, fin.len(), variants[i].piles.len()));
+                let ps = problem.piles_of(&variants[i].piles);
+                let o = crate::aster::Options::new(exe.clone(), std::env::temp_dir().join(format!("femgeo_aster_{}_{k}", std::process::id())), &ps);
+                let f = crate::aster::flexibility(&ps, soil.as_ref(), &o)?;
+                let e = problem.evaluate_flex(&variants[i].piles, &f.flexibility)?;
+                variants.push(e);
+            }
+        }
         // Существующая расстановка — первой строкой, для сравнения.
         let reference = problem.reference()?;
         let has_reference = reference.is_some();
@@ -776,6 +794,7 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bo
             "feasible": v.feasible,
             "design_impossible": v.design_impossible,
             "capped": v.capped,
+            "soil_3d": v.soil_3d,
             "capped_share": v.capped_share,
             "conditional": v.conditional.as_ref().map(|c| json!({ "s": c.s, "p": c.p, "area": c.area, "phi_mt": c.phi_mt, "hc": c.hc })),
             "piles": v.piles.iter().zip(&v.pile_n).map(|(&n, &f)| json!({ "x": raft.nodes[n][0], "y": raft.nodes[n][1], "n": f })).collect::<Vec<_>>(),
@@ -859,6 +878,7 @@ pub fn default_input() -> Input {
         existing: vec![],
         pile_fu: None,
         pile_model: sp24(),
+        refine_3d: 0,
     }
 }
 

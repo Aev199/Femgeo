@@ -3,6 +3,7 @@
 //! Этап 1 — расчёты сечений по СП 63.13330 ([`sp63`]); этап 2 — линейный МКЭ ([`fem`]).
 
 pub mod fem;
+pub mod aster;
 pub mod building;
 pub mod geobase;
 pub mod loads;

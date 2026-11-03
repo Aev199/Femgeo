@@ -218,6 +218,8 @@ pub struct Evaluation {
     pub capped_share: f64,
     /// Условный фундамент (если жёсткость свай по нему).
     pub conditional: Option<crate::piles::conditional::Conditional>,
+    /// Податливость свай — по 3D-основанию (этап 3, `evaluate_flex`).
+    pub soil_3d: bool,
     pub feasible: bool,
 }
 
@@ -258,23 +260,36 @@ impl Problem<'_> {
 
     /// Расчёт варианта со сваями в узлах `piles`.
     pub fn evaluate(&self, piles: &[usize]) -> Result<Evaluation, String> {
-        self.evaluate_with(piles, true)
+        self.evaluate_with(piles, true, None)
     }
 
-    /// Расчёт без подбора армирования: нагрузки на сваи и осадки (`kg_m3` = NaN).
-    pub fn evaluate_fast(&self, piles: &[usize]) -> Result<Evaluation, String> {
-        self.evaluate_with(piles, false)
+    /// Расчёт варианта с заданной матрицей податливости свай (м/кН, n × n построчно, в порядке
+    /// `piles`) — например, по 3D-основанию (`aster::flexibility`, этап 3).
+    pub fn evaluate_flex(&self, piles: &[usize], flex: &[f64]) -> Result<Evaluation, String> {
+        if flex.len() != piles.len() * piles.len() {
+            return Err("размер матрицы податливости не равен числу свай в квадрате".into());
+        }
+        self.evaluate_with(piles, true, Some(flex))
     }
 
-    fn evaluate_with(&self, piles: &[usize], design: bool) -> Result<Evaluation, String> {
-        let ps: Vec<Pile> = piles
+    /// Сваи варианта для внешних моделей (координаты узлов плиты, тип сваи задачи).
+    pub fn piles_of(&self, piles: &[usize]) -> Vec<Pile> {
+        piles
             .iter()
             .map(|&n| {
                 let [x, y] = self.xy(n);
                 Pile { x, y, head: self.pile_head, length: self.pile.length, d: self.pile.d, ea: self.pile.ea }
             })
-            .collect();
-        let field = if self.conditional.is_some() { None } else { Some(Field::new(&ps, self.soil)) };
+            .collect()
+    }
+
+    /// Расчёт без подбора армирования: нагрузки на сваи и осадки (`kg_m3` = NaN).
+    pub fn evaluate_fast(&self, piles: &[usize]) -> Result<Evaluation, String> {
+        self.evaluate_with(piles, false, None)
+    }
+
+    fn evaluate_with(&self, piles: &[usize], design: bool, flex: Option<&[f64]>) -> Result<Evaluation, String> {
+        let field = if self.conditional.is_some() || flex.is_some() { None } else { Some(Field::new(&self.piles_of(piles), self.soil)) };
         let p = self.prepared()?;
         let m = &self.raft;
         let np = piles.len();
@@ -291,6 +306,10 @@ impl Problem<'_> {
         let mut conditional = None;
         let mut pile_flex = vec![0.0; np * np];
         let a: Vec<f64> = match (&field, &self.conditional) {
+            _ if flex.is_some() => {
+                pile_flex = flex.unwrap().to_vec();
+                pile_flex.iter().zip(&gss).map(|(x, y)| x + y).collect()
+            }
             (Some(f), _) => {
                 pile_flex = f.flexibility.clone();
                 f.flexibility.iter().zip(&gss).map(|(x, y)| x + y).collect()
@@ -683,6 +702,7 @@ impl Problem<'_> {
             capped: capped_any,
             capped_share,
             conditional,
+            soil_3d: flex.is_some(),
             feasible: false,
         };
         ev.feasible = !impossible && !overloaded && capped_share <= CAPPED_SHARE_MAX + 1e-12 && ev.worst(&self.limits) <= 1.0;

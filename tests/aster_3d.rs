@@ -1,0 +1,179 @@
+//! Этап 3: 3D-основание в Code_Aster. Тесты с решателем пропускаются, если `run_aster` не
+//! найден (`FEMGEO_ASTER` или /opt/aster/bin/run_aster).
+
+use femgeo::aster::{self, Options};
+use femgeo::fem::{LoadCase, Model, Shell, ShellMaterial};
+use femgeo::optimize::{PileType, Problem, SettlementLimits};
+use femgeo::piles::layout::{PileKind, Region, Rules};
+use femgeo::piles::{Field, Layer, Pile, SinglePile, SoilColumn};
+use femgeo::sp63::capra_maury::{PlateSection, UlsContext};
+use femgeo::sp63::materials::{CalcType, ConcreteClass, ConcreteDiagramType, RebarClass};
+
+fn uniform(_: f64, _: f64) -> SoilColumn {
+    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -100.0, e: 20_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] }
+}
+
+fn layered(_: f64, _: f64) -> SoilColumn {
+    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 0.0, phi: 0.0 }] }
+}
+
+fn pile(x: f64, y: f64, d: f64, l: f64) -> Pile {
+    Pile { x, y, head: -0.8, length: l, d, ea: 3.0e7 * std::f64::consts::PI * d * d / 4.0 }
+}
+
+fn workdir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("femgeo_aster_{name}_{}", std::process::id()))
+}
+
+#[test]
+fn grid_geometry() {
+    let ps = [pile(0.0, 0.0, 0.6, 10.0), pile(1.8, 0.0, 0.6, 10.0)];
+    let o = Options::new("run_aster".into(), workdir("grid"), &ps);
+    let g = aster::grid(&ps, &layered, &o).unwrap();
+    let b = aster::square_side(0.6);
+    // Объём свай — n·b²·L.
+    let mut v = 0.0;
+    let (nx, ny) = (g.x.len() - 1, g.y.len() - 1);
+    for (e, &m) in g.mat.iter().enumerate() {
+        let (i, j, k) = (e % nx, (e / nx) % ny, e / (nx * ny));
+        if m < 2 && g.materials[m].0 > 1e6 {
+            v += (g.x[i + 1] - g.x[i]) * (g.y[j + 1] - g.y[j]) * (g.z[k + 1] - g.z[k]);
+        }
+    }
+    assert!((v - 2.0 * b * b * 10.0).abs() < 1e-6, "объём свай {v}");
+    assert!(g.heads.iter().all(|h| h.len() == 4));
+    assert_eq!(g.z.last().copied(), Some(-0.8));
+    assert!(g.z.iter().any(|z| (z + 8.0).abs() < 1e-9), "граница слоя не в сетке");
+    // Боковые границы и низ — на max(L, B) от свай.
+    assert!((g.x[0] - (-b / 2.0 - 10.0)).abs() < 1e-9 && (g.z[0] - (-10.8 - 10.0)).abs() < 1e-9);
+    let m = aster::mail(&g);
+    assert_eq!(m.lines().filter(|l| l.starts_with('M') && l.contains(" N")).count(), g.n_elems());
+}
+
+#[test]
+fn single_pile_vs_sp24() {
+    let Some(exe) = Options::find_run_aster() else {
+        println!("Code_Aster не найден — пропуск");
+        return;
+    };
+    let ps = [pile(0.0, 0.0, 0.6, 15.0)];
+    let o = Options::new(exe, workdir("single"), &ps);
+    let f = aster::flexibility(&ps, &uniform, &o).unwrap();
+    let sp = SinglePile::new(&ps[0], &uniform(0.0, 0.0));
+    let r = f.flexibility[0] / sp.compliance;
+    println!("одиночная свая: 3D {:.4e} м/кН, СП 24 {:.4e}, отношение {r:.3}; узлов {}, {:.1} с", f.flexibility[0], sp.compliance, f.nodes, f.seconds);
+    // Сравнение разных моделей (сплошная среда и формула (7.33)): порог задан заранее.
+    assert!(r > 0.7 && r < 1.4, "отношение {r}");
+}
+
+fn raft(a: f64, n: usize) -> Model {
+    let mut m = Model::default();
+    let id = |i: usize, j: usize| i * (n + 1) + j;
+    for i in 0..=n {
+        for j in 0..=n {
+            m.nodes.push([a * j as f64 / n as f64, a * i as f64 / n as f64, 0.0]);
+        }
+    }
+    let mat = ShellMaterial { e: 3.0e7, nu: 0.2, h: 0.8 };
+    for i in 0..n {
+        for j in 0..n {
+            m.shells.push(Shell { nodes: vec![id(i, j), id(i, j + 1), id(i + 1, j + 1), id(i + 1, j)], mat });
+        }
+    }
+    for k in 0..m.nodes.len() {
+        m.fixed.push((k, [false, false, false, false, false, true]));
+    }
+    m.fixed.push((0, [true, true, false, false, false, false]));
+    m.fixed.push((n, [false, true, false, false, false, false]));
+    m
+}
+
+#[test]
+fn raft_on_3d_soil() {
+    let Some(exe) = Options::find_run_aster() else {
+        println!("Code_Aster не найден — пропуск");
+        return;
+    };
+    const A: f64 = 12.0;
+    const Q: f64 = 300.0;
+    let d = 0.6;
+    let (c, r) = (ConcreteClass::B25.chars(CalcType::Uls), RebarClass::A500.chars(CalcType::Uls));
+    let sec = PlateSection { h: 0.8, a_top: 0.05, a_bot: 0.05, ds_x: 0.016, ds_y: 0.016, concrete_diagram: ConcreteDiagramType::L3 };
+    let design = UlsContext::new(&sec, &c, &r);
+    let m = raft(A, 12);
+    let lc = LoadCase { pressure: (0..m.shells.len()).map(|s| (s, -Q)).collect(), ..Default::default() };
+    let p = Problem {
+        raft: m,
+        pile_head: -0.8,
+        pile: PileType { length: 15.0, d, ea: 3.0e7 * std::f64::consts::PI * d * d / 4.0, fd_ground: 2_500.0, material_util_per_kn: 0.0 },
+        region: Region { outer: vec![[0.0, 0.0], [A, 0.0], [A, A], [0.0, A]], holes: vec![] },
+        rules: Rules::sp24(PileKind::Bored, d),
+        soil: &layered,
+        cases: vec![lc],
+        uls: vec![vec![1.0]],
+        sls: vec![],
+        sls_long: None,
+        limits: SettlementLimits { s_max: 0.15, ds_rel_max: 0.002 },
+        design: &design,
+        rebar_axis: [1.0, 0.0, 0.0],
+        raft_h: 0.8,
+        building: None,
+        crack_short: None,
+        crack_long: None,
+        punching: None,
+        existing: vec![],
+        pile_fu: None,
+        conditional: None,
+        structure_punch: vec![],
+        cache: Default::default(),
+    };
+    // Сетка свай 4 × 4 с шагом 3 м (узлы 1, 4, 7, 10).
+    let grid: Vec<usize> = p.candidates().into_iter().filter(|&k| { let q = p.raft.nodes[k]; (q[0] as i64 - 1) % 3 == 0 && (q[1] as i64 - 1) % 3 == 0 }).collect();
+    assert_eq!(grid.len(), 16);
+    let ps = p.piles_of(&grid);
+    let o = Options::new(exe, workdir("raft"), &ps);
+    let f = aster::flexibility(&ps, &layered, &o).unwrap();
+    println!("3D: узлов {}, элементов {}, {:.1} с, несимметрия {:.2e}", f.nodes, f.elements, f.seconds, f.asymmetry);
+    // Одна факторизация, симметричная матрица: несимметрия — ошибка округления.
+    assert!(f.asymmetry < 1e-6);
+    let e3 = p.evaluate_flex(&grid, &f.flexibility).unwrap();
+    let e1 = p.evaluate(&grid).unwrap();
+    let sum: f64 = e3.pile_n.iter().sum();
+    assert!((sum - Q * A * A).abs() < 1e-3 * Q * A * A, "Σ реакций {sum}");
+    let corner = |e: &femgeo::optimize::Evaluation| {
+        let i = grid.iter().position(|&k| p.raft.nodes[k][0] == 1.0 && p.raft.nodes[k][1] == 1.0).unwrap();
+        let j = grid.iter().position(|&k| p.raft.nodes[k][0] == 4.0 && p.raft.nodes[k][1] == 4.0).unwrap();
+        e.pile_n[i] / e.pile_n[j]
+    };
+    let f24 = Field::new(&ps, &layered).flexibility;
+    println!("СП 24: s {:.4} м, угол/центр {:.3}, F11 {:.3e}; 3D: s {:.4} м, угол/центр {:.3}, F11 {:.3e}", e1.s_max, corner(&e1), f24[0], e3.s_max, corner(&e3), f.flexibility[0]);
+    // Упругое полупространство: угловые сваи нагружены больше центральных.
+    assert!(corner(&e3) > 1.0);
+    assert!(e3.s_max > 0.0 && e3.s_max.is_finite());
+}
+
+#[test]
+fn service_refine_3d() {
+    if Options::find_run_aster().is_none() {
+        println!("Code_Aster не найден — пропуск");
+        return;
+    }
+    let mut s = femgeo::service::Service::new();
+    let mut input = s.dispatch("defaults", serde_json::Value::Null, &mut |_| {}).unwrap();
+    input["refine_3d"] = serde_json::json!(1);
+    let out = s.dispatch("run", input, &mut |m| if m.starts_with("3D") { println!("{m}") }).unwrap();
+    let vs = out["variants"].as_array().unwrap();
+    let v3: Vec<&serde_json::Value> = vs.iter().filter(|v| v["soil_3d"] == true).collect();
+    assert_eq!(v3.len(), 1);
+    // Та же расстановка, что у финалиста; равновесие сохраняется.
+    let n3 = v3[0]["piles"].as_array().unwrap();
+    let base = vs.iter().find(|v| v["soil_3d"] == false && v["piles"].as_array().unwrap().len() == n3.len() && v["feasible"] == true).unwrap();
+    let sum = |v: &serde_json::Value| v["piles"].as_array().unwrap().iter().map(|p| p["n"].as_f64().unwrap()).sum::<f64>();
+    println!("Σ N: {:.0} / {:.0}", sum(base), sum(v3[0]));
+    assert!((sum(base) - sum(v3[0])).abs() < 1e-3 * sum(base));
+    let rp = std::env::temp_dir().join("femgeo_aster_report.html");
+    let i = vs.len() - 1;
+    assert_eq!(vs[i]["soil_3d"], true);
+    s.dispatch("export_report", serde_json::json!({ "path": rp, "variant": i }), &mut |_| {}).unwrap();
+    assert!(std::fs::read_to_string(&rp).unwrap().contains("3D-основании"));
+}
