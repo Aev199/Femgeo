@@ -540,11 +540,12 @@ impl Service {
                             let region = Region { outer: r.outline.clone(), holes: r.holes.clone() };
                             let edge = (1..=40).map(|k| -(k as f64) * h0 / 40.0).find(|&sv| !region.contains(q(sv, 0.0)));
                             if let Some(se) = edge {
-                                // Участки длиной t от края плиты вдоль стены (по тексту п. 6.3.8; сверить с рис. 6.1).
+                                // Рис. 6.1, б (контур 1′): от края плиты вдоль граней стены до a1 = t за торцом
+                                // (s отсчитывается от торца внутрь стены).
                                 let se = se + h0 / 80.0;
-                                let s2 = se + t;
+                                let s2 = t;
                                 let segs2 = vec![(q(se, w), q(s2, w), nrm), (q(se, -w), q(s2, -w), [-nrm[0], -nrm[1]])];
-                                v.push(("wall_end_edge", 2.0 * t, vec![q(se, -w), q(s2, -w), q(s2, w), q(se, w)], segs2, vec![nrm]));
+                                v.push(("wall_end_edge", 2.0 * (s2 - se), vec![q(se, -w), q(s2, -w), q(s2, w), q(se, w)], segs2, vec![nrm]));
                             }
                             v
                         }
