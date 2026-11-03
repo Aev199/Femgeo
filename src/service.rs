@@ -521,10 +521,10 @@ impl Service {
                     // Расчётные контуры: (вид, длина, область внутри, отрезки (начало, конец, наружная нормаль)
                     // для силы по поперечным силам плиты — торцы и углы стен).
                     type Seg = ([f64; 2], [f64; 2], [f64; 2]);
-                    let checks: Vec<(&str, f64, Vec<[f64; 2]>, Vec<Seg>)> = match st.kind {
+                    let checks: Vec<(&str, f64, Vec<[f64; 2]>, Vec<Seg>, Vec<[f64; 2]>)> = match st.kind {
                         crate::building::StructureKind::Column { b, h } => {
                             let (hx, hy) = ((b + h0) / 2.0, (h + h0) / 2.0);
-                            vec![("column", 2.0 * (b + h) + 4.0 * h0, rect(c[0] - hx, c[0] + hx, c[1] - hy, c[1] + hy), vec![])]
+                            vec![("column", 2.0 * (b + h) + 4.0 * h0, rect(c[0] - hx, c[0] + hx, c[1] - hy, c[1] + hy), vec![], vec![[1.0, 0.0], [0.0, 1.0]])]
                         }
                         crate::building::StructureKind::WallEnd { t, dir } => {
                             // СП 430, п. 6.3.8: участок у торца на h0/2 и два вдоль стены той же длины t + h0.
@@ -534,7 +534,17 @@ impl Service {
                             let q = |s: f64, n: f64| [c[0] + s * dir[0] + n * nrm[0], c[1] + s * dir[1] + n * nrm[1]];
                             let (s0, s1) = (-h0 / 2.0, -h0 / 2.0 + l);
                             let segs = vec![(q(s0, -w), q(s0, w), [-dir[0], -dir[1]]), (q(s0, w), q(s1, w), nrm), (q(s0, -w), q(s1, -w), [-nrm[0], -nrm[1]])];
-                            vec![("wall_end", 3.0 * l, vec![q(s0, -w), q(s1, -w), q(s1, w), q(s0, w)], segs)]
+                            let mut v = vec![("wall_end", 3.0 * l, vec![q(s0, -w), q(s1, -w), q(s1, w), q(s0, w)], segs, vec![nrm])];
+                            // Торец у края плиты (СП 430, п. 6.3.8): дополнительно — контур из двух участков
+                            // вдоль граней стены на h0/2, от края плиты до конца боковых участков.
+                            let region = Region { outer: r.outline.clone(), holes: r.holes.clone() };
+                            let edge = (1..=40).map(|k| -(k as f64) * h0 / 40.0).find(|&sv| !region.contains(q(sv, 0.0)));
+                            if let Some(se) = edge {
+                                let se = se + h0 / 80.0;
+                                let segs2 = vec![(q(se, w), q(s1, w), nrm), (q(se, -w), q(s1, -w), [-nrm[0], -nrm[1]])];
+                                v.push(("wall_end_edge", 2.0 * (s1 - se), vec![q(se, -w), q(s1, -w), q(s1, w), q(se, w)], segs2, vec![nrm]));
+                            }
+                            v
                         }
                         crate::building::StructureKind::WallCorner { t, d1, d2 } => {
                             // СП 430, рис. 6.2 (a1 = a2 = t): наружный контур — два участка a1 + a2 на h0/2 от
@@ -549,12 +559,12 @@ impl Service {
                             let ln = (dn[0] * dn[0] + dn[1] * dn[1]).sqrt().max(1e-12);
                             let inner = vec![(p1, p2, [dn[0] / ln, dn[1] / ln])];
                             let area = vec![o, pt(o, 2.0 * t, 0.0), p2, p1, pt(o, 0.0, 2.0 * t)];
-                            vec![("wall_corner_outer", 4.0 * t, area.clone(), outer), ("wall_corner_inner", (2.0f64).sqrt() * t, area, inner)]
+                            vec![("wall_corner_outer", 4.0 * t, area.clone(), outer, vec![]), ("wall_corner_inner", (2.0f64).sqrt() * t, area, inner, vec![])]
                         }
                     };
                     checks
                         .into_iter()
-                        .map(|(kind, u, inside, segs)| {
+                        .map(|(kind, u, inside, segs, moment_axes)| {
                             let samples = along(inside.clone(), 18);
                             // Точки контура в элементах плиты (вне плиты — не учитываются).
                             let shear = (!segs.is_empty()).then(|| {
@@ -564,10 +574,10 @@ impl Service {
                                         let ds = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / k as f64;
                                         (0..k).map(move |j| { let t = (j as f64 + 0.5) / k as f64; ([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], nrm, ds) })
                                     })
-                                    .filter_map(|(p, nrm, ds)| element_at(&raft, p).map(|e| (e, nrm, ds)))
+                                    .filter_map(|(p, nrm, ds)| element_at(&raft, p).map(|e| (e, nrm, ds, p)))
                                     .collect()
                             });
-                            crate::optimize::PunchArea { kind: kind.into(), at: c, nodes: nodes.clone(), u, samples, inside: Region { outer: inside, holes: vec![] }, shear }
+                            crate::optimize::PunchArea { kind: kind.into(), at: c, nodes: nodes.clone(), u, samples, inside: Region { outer: inside, holes: vec![] }, shear, moment_axes }
                         })
                         .collect::<Vec<_>>()
                 })

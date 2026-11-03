@@ -174,8 +174,12 @@ pub struct PunchArea {
     /// Область внутри контура: сваи с центром в ней разгружают продавливание.
     pub inside: Region,
     /// Торцы и углы стен (СП 430.1325800.2018, п. 6.3.8): сила — равнодействующая поперечных
-    /// сил плиты по контуру: точки контура (элемент плиты, нормаль в плане, длина участка).
-    pub shear: Option<Vec<(usize, [f64; 2], f64)>>,
+    /// сил плиты по контуру: точки контура (элемент плиты, нормаль в плане, длина участка, точка).
+    pub shear: Option<Vec<(usize, [f64; 2], f64, [f64; 2])>>,
+    /// Направления плеча для моментов (СП 63, п. 8.1.46): F/Fb + Σ M/Mb ≤ 1, M/Mb ≤ F/(2Fb).
+    /// Торец стены — поперёк стены (момент из плоскости стены, СП 430, п. 6.3.8); колонна — X и Y;
+    /// угол стены — нет.
+    pub moment_axes: Vec<[f64; 2]>,
 }
 
 /// Оценка варианта.
@@ -425,23 +429,35 @@ impl Problem<'_> {
         };
         // ПС1: нагрузки на сваи (R = −K·w, сжатие — положительное) и армирование.
         // Вертикальная сила здания на узлы плиты в сочетании (вниз > 0): r = f − K·u суперэлемента.
-        let building_down = |c: &[f64], u: &[f64]| -> HashMap<usize, f64> {
-            let mut out: HashMap<usize, f64> = HashMap::new();
+        // Сила здания на узлы плиты: [Fz вниз, Mx, My] (r = K·u − f суперэлемента).
+        let building_down = |c: &[f64], u: &[f64]| -> HashMap<usize, [f64; 3]> {
+            let mut out: HashMap<usize, [f64; 3]> = HashMap::new();
             let Some(b) = self.building else { return out };
             let nd = b.block.dofs.len();
             for (i, &di) in b.block.dofs.iter().enumerate() {
-                if di % 6 != 2 {
+                let k = di % 6;
+                if !(2..=4).contains(&k) {
                     continue;
                 }
                 let ku: f64 = (0..nd).map(|j| b.block.k[i * nd + j] * u[b.block.dofs[j]]).sum();
-                *out.entry(di / 6).or_default() += ku;
+                out.entry(di / 6).or_default()[k - 2] += ku;
             }
             for (f, loads) in c.iter().zip(&b.loads) {
                 for &(n, l) in loads {
-                    *out.entry(n).or_default() -= f * l[2];
+                    let e = out.entry(n).or_default();
+                    (0..3).for_each(|k| e[k] -= f * l[2 + k]);
                 }
             }
             out
+        };
+        // Wb контура для плеча вдоль `axis` (точки с длинами участков): Ib = Σ y²·ds, Wb = Ib / ymax.
+        let section = |pts: &[([f64; 2], f64)], axis: [f64; 2]| -> (f64, Vec<f64>) {
+            let len: f64 = pts.iter().map(|p| p.1).sum::<f64>().max(1e-12);
+            let g = pts.iter().fold([0.0, 0.0], |a, p| [a[0] + p.0[0] * p.1 / len, a[1] + p.0[1] * p.1 / len]);
+            let y: Vec<f64> = pts.iter().map(|p| (p.0[0] - g[0]) * axis[0] + (p.0[1] - g[1]) * axis[1]).collect();
+            let ib: f64 = y.iter().zip(pts).map(|(y, p)| y * y * p.1).sum();
+            let ym = y.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-12);
+            (ib / ym, y)
         };
         let mut util_punch_struct: f64 = 0.0;
         let mut punch_struct_worst = None;
@@ -453,11 +469,12 @@ impl Problem<'_> {
                 let down = building_down(c, &u);
                 let mut q_of: HashMap<usize, [f64; 2]> = HashMap::new();
                 for (ai, a) in self.structure_punch.iter().enumerate() {
-                    let (f, cap) = if let Some(sh) = &a.shear {
-                        // Равнодействующая поперечных сил по контуру (глобальные оси плана).
+                    let (f, cap, mterm) = if let Some(sh) = &a.shear {
+                        // Равнодействующая поперечных сил по контуру (глобальные оси плана) и её момент.
                         let mut sum = 0.0;
                         let mut len = 0.0;
-                        for &(e, nrm, ds) in sh {
+                        let mut qn = vec![];
+                        for &(e, nrm, ds, _) in sh {
                             let q = *q_of.entry(e).or_insert_with(|| {
                                 let el = &m.shells[e];
                                 let cc: Vec<V3> = el.nodes.iter().map(|&k| m.nodes[k]).collect();
@@ -465,17 +482,46 @@ impl Problem<'_> {
                                 let (r, f) = fem::shell::forces(&cc, &el.mat, &ue).expect("элемент проверен при сборке");
                                 [f[6] * r[0][0] + f[7] * r[1][0], f[6] * r[0][1] + f[7] * r[1][1]]
                             });
-                            sum += (q[0] * nrm[0] + q[1] * nrm[1]) * ds;
+                            let v = (q[0] * nrm[0] + q[1] * nrm[1]) * ds;
+                            sum += v;
                             len += ds;
+                            qn.push(v);
                         }
-                        (sum.abs(), pp.rbt * len.max(1e-9) * pp.h0)
+                        let pts: Vec<([f64; 2], f64)> = sh.iter().map(|x| (x.3, x.2)).collect();
+                        let ms: Vec<f64> = a
+                            .moment_axes
+                            .iter()
+                            .map(|&ax| {
+                                let (wb, y) = section(&pts, ax);
+                                let mm: f64 = qn.iter().zip(&y).map(|(v, y)| v * y).sum::<f64>().abs();
+                                mm / (pp.rbt * wb * pp.h0)
+                            })
+                            .collect();
+                        (sum.abs(), pp.rbt * len.max(1e-9) * pp.h0, ms)
                     } else {
-                        let f: f64 = a.nodes.iter().map(|k| down.get(k).copied().unwrap_or(0.0)).sum();
+                        let tot = a.nodes.iter().fold([0.0; 3], |acc, k| {
+                            let d = down.get(k).copied().unwrap_or([0.0; 3]);
+                            [acc[0] + d[0], acc[1] + d[1], acc[2] + d[2]]
+                        });
                         let relief: f64 = piles.iter().zip(&n).filter(|(&q, _)| a.inside.contains(self.xy(q))).map(|(_, &x)| x).sum();
-                        let frac = a.samples.iter().filter(|&&q| pp.raft.contains(q)).count() as f64 / a.samples.len().max(1) as f64;
-                        (f - relief, pp.rbt * a.u * frac.max(1e-9) * pp.h0)
+                        let inside: Vec<([f64; 2], f64)> = a.samples.iter().filter(|&&q| pp.raft.contains(q)).map(|&q| (q, a.u / a.samples.len().max(1) as f64)).collect();
+                        let frac = inside.len() as f64 / a.samples.len().max(1) as f64;
+                        // Колонна: плечо вдоль X — момент My, вдоль Y — Mx.
+                        let ms: Vec<f64> = a
+                            .moment_axes
+                            .iter()
+                            .map(|&ax| {
+                                let m = if ax[0].abs() > ax[1].abs() { tot[2] } else { tot[1] };
+                                let (wb, _) = section(&inside, ax);
+                                m.abs() / (pp.rbt * wb * pp.h0)
+                            })
+                            .collect();
+                        (tot[0] - relief, pp.rbt * a.u * frac.max(1e-9) * pp.h0, ms)
                     };
-                    let util = f.max(0.0) / cap;
+                    // F/Fb + Σ M/Mb, моментная часть не больше половины силовой (СП 63, п. 8.1.46).
+                    let ft = f.max(0.0) / cap;
+                    let util = ft + mterm.iter().map(|m| m.min(0.5 * ft)).sum::<f64>();
+                    let f = util * cap;
                     if util > area_worst[ai].0 / area_worst[ai].1 {
                         area_worst[ai] = (f.max(0.0), cap);
                     }
