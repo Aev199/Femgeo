@@ -726,12 +726,41 @@ impl Problem<'_> {
 
     /// Начальная расстановка из ≈ `n` свай: жадный отбор кандидатов (по координатам) с
     /// шагом s, убывающим от √(A/n) до `min_spacing`, пока свай не станет не меньше `n`.
+    /// Кандидаты по приоритету: у колонн, торцов и углов стен (точки продавливания), затем под
+    /// стенами (узлы сопряжения здания), затем остальные.
+    fn by_priority(&self, cand: &[usize]) -> Vec<usize> {
+        let near = |p: [f64; 2]| cand.iter().copied().min_by(|&a, &b| dist(self.xy(a), p).total_cmp(&dist(self.xy(b), p)));
+        let mut out: Vec<usize> = vec![];
+        let push = |c: usize, out: &mut Vec<usize>| {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        };
+        for a in &self.structure_punch {
+            if let Some(c) = near(a.at) {
+                push(c, &mut out);
+            }
+        }
+        if let Some(b) = self.building {
+            for d in b.block.dofs.iter().step_by(3) {
+                if let Some(c) = near(self.xy(d / 6)) {
+                    push(c, &mut out);
+                }
+            }
+        }
+        for &c in cand {
+            push(c, &mut out);
+        }
+        out
+    }
+
     fn initial(&self, cand: &[usize], n: usize) -> Vec<usize> {
         let area: f64 = self.raft.shells.iter().map(|s| shell_area(&s.nodes.iter().map(|&k| self.raft.nodes[k]).collect::<Vec<_>>())).sum();
         let mut step = (area / n.max(1) as f64).sqrt().max(self.rules.min_spacing);
+        let ordered = self.by_priority(cand);
         loop {
             let mut out: Vec<usize> = Vec::new();
-            for &c in cand {
+            for &c in &ordered {
                 let p = self.xy(c);
                 if out.iter().all(|&q| dist(p, self.xy(q)) >= step - 1e-9) {
                     out.push(c);
@@ -760,7 +789,12 @@ impl Problem<'_> {
             let mut order: Vec<usize> = (0..np).collect();
             order.sort_by(|&a, &b| cur.pile_n[a].total_cmp(&cur.pile_n[b]).then(self.xy(cur.piles[a])[1].total_cmp(&self.xy(cur.piles[b])[1])));
             let (lo, hi) = (order[0], order[np - 1]);
-            let target = self.xy(cur.piles[hi]);
+            // Цель переноса: определяющая конструкция по продавливанию, иначе самая нагруженная свая.
+            let punch_governs = cur.util_punch_struct / 2.0 >= cur.worst(&self.limits) - 1e-12 && cur.util_punch_struct > 1.0;
+            let target = match (&cur.punch_struct_worst, punch_governs) {
+                (Some(w), true) => w.1,
+                _ => self.xy(cur.piles[hi]),
+            };
             let mut near: Vec<usize> = cand.iter().copied().filter(|&c| self.spacing_ok(&cur.piles, lo, c) && !cur.piles.contains(&c)).collect();
             // Ориентир: при наличии существующих свай предпочтение позициям рядом с ними.
             let key = |c: usize| dist(self.xy(c), target) + if self.existing.is_empty() { 0.0 } else { 0.5 * self.existing_distance(self.xy(c)) };
