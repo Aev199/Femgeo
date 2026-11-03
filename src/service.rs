@@ -1085,6 +1085,7 @@ impl Service {
         }
         let mx: Vec<f64> = (0..4).map(|k| fields.iter().map(|f| f[k] * 1e4).fold(0.0, f64::max)).collect();
         let envelope;
+        let case_forces;
         let diag = {
             // Диагностика худшего элемента: перемещения узлов в первом сочетании ПС1, примыкающие
             // стержни и пластины, узловые нагрузки.
@@ -1095,7 +1096,7 @@ impl Service {
             let us: Vec<Vec<f64>> = cases.iter().map(|lc| lin.solve(&m, lc)).collect::<Result<_, _>>()?;
             let u = |n: usize, k: usize| c0.iter().zip(&us).map(|(f, u)| f * u[6 * n + k]).sum::<f64>();
             // Огибающие |N|, |M|, |Q| по сочетаниям ПС1 для подземных пластин — по толщинам.
-            let mut env: std::collections::BTreeMap<String, [f64; 4]> = Default::default();
+            let mut env: std::collections::BTreeMap<String, [f64; 5]> = Default::default();
             for c in &lm.combos.uls {
                 let uc: Vec<f64> = (0..us[0].len()).map(|i| c.iter().zip(&us).map(|(f, u)| f * u[i]).sum()).collect();
                 for e in (0..m.shells.len()).filter(|&e| under[e]) {
@@ -1104,7 +1105,8 @@ impl Service {
                     let ue: Vec<f64> = el.nodes.iter().flat_map(|&k| uc[6 * k..6 * k + 6].to_vec()).collect();
                     if let Ok((_, f)) = crate::fem::shell::forces(&cc, &el.mat, &ue) {
                         let k = format!("{:.2}", el.mat.h);
-                        let v = env.entry(k).or_insert([0.0; 4]);
+                        let v = env.entry(k).or_insert([0.0; 5]);
+                        v[4] = v[4].max(f[2].abs());
                         v[0] = v[0].max(f[0].abs().max(f[1].abs()));
                         v[1] = v[1].max(f[3].abs().max(f[4].abs()));
                         v[2] = v[2].max(f[5].abs());
@@ -1112,7 +1114,13 @@ impl Service {
                     }
                 }
             }
-            envelope = json!(env.iter().map(|(k, v)| json!({ "h": k, "n": v[0], "m": v[1], "mxy": v[2], "q": v[3] })).collect::<Vec<_>>());
+            case_forces = json!(us.iter().map(|uc| {
+                let el = &m.shells[wn];
+                let cc: Vec<crate::fem::V3> = el.nodes.iter().map(|&k| m.nodes[k]).collect();
+                let ue: Vec<f64> = el.nodes.iter().flat_map(|&k| uc[6 * k..6 * k + 6].to_vec()).collect();
+                crate::fem::shell::forces(&cc, &el.mat, &ue).map(|x| x.1.to_vec()).unwrap_or_default()
+            }).collect::<Vec<_>>());
+            envelope = json!(env.iter().map(|(k, v)| json!({ "h": k, "n": v[0], "nxy": v[4], "m": v[1], "mxy": v[2], "q": v[3] })).collect::<Vec<_>>());
             json!(ns.iter().map(|&n| json!({
                 "node": n, "xyz": m.nodes[n], "uz_mm": u(n, 2) * 1e3, "rx": u(n, 3), "ry": u(n, 4),
                 "beams": m.beams.iter().filter(|b| b.n1 == n || b.n2 == n).count(),
@@ -1129,6 +1137,7 @@ impl Service {
             "max": mx,
             "raw_max": raw_max,
             "envelope": envelope,
+            "worst_case_forces": case_forces,
             "worst": { "x": wc[0], "y": wc[1], "z": wc[2], "h": m.shells[worst].mat.h, "as": fields[worst].map(|x| x * 1e4), "diag": diag },
         });
         self.last_underground = Some((m, fields));
