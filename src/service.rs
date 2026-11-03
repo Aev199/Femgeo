@@ -1056,6 +1056,22 @@ impl Service {
             fields[e] = el.required;
         }
         let mx: Vec<f64> = (0..4).map(|k| fields.iter().map(|f| f[k] * 1e4).fold(0.0, f64::max)).collect();
+        let diag = {
+            // Диагностика худшего элемента: перемещения узлов в первом сочетании ПС1, примыкающие
+            // стержни и пластины, узловые нагрузки.
+            let wn = m.shells.iter().enumerate().max_by(|a, b| fields[a.0].iter().cloned().fold(0.0, f64::max).total_cmp(&fields[b.0].iter().cloned().fold(0.0, f64::max))).unwrap().0;
+            let ns = m.shells[wn].nodes.clone();
+            let lin = m.factorize()?;
+            let c0 = &lm.combos.uls[0];
+            let us: Vec<Vec<f64>> = cases.iter().map(|lc| lin.solve(&m, lc)).collect::<Result<_, _>>()?;
+            let u = |n: usize, k: usize| c0.iter().zip(&us).map(|(f, u)| f * u[6 * n + k]).sum::<f64>();
+            json!(ns.iter().map(|&n| json!({
+                "node": n, "xyz": m.nodes[n], "uz_mm": u(n, 2) * 1e3, "rx": u(n, 3), "ry": u(n, 4),
+                "beams": m.beams.iter().filter(|b| b.n1 == n || b.n2 == n).count(),
+                "shells": m.shells.iter().filter(|s| s.nodes.contains(&n)).count(),
+                "fz": cases.iter().zip(c0).map(|(lc, f)| f * lc.nodal.iter().filter(|x| x.0 == n).map(|x| x.1[2]).sum::<f64>()).sum::<f64>(),
+            })).collect::<Vec<_>>())
+        };
         // Элемент с наибольшим армированием: центр, толщина, требуемое (см²/м).
         let worst = (0..m.shells.len()).max_by(|&a, &b| fields[a].iter().cloned().fold(0.0, f64::max).total_cmp(&fields[b].iter().cloned().fold(0.0, f64::max))).unwrap();
         let wc = m.shells[worst].nodes.iter().fold([0.0; 3], |a, &k| { let p = m.nodes[k]; let n = m.shells[worst].nodes.len() as f64; [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n] });
@@ -1063,7 +1079,7 @@ impl Service {
             "variant": i, "elements": n, "ground": lm.ground, "kg": kg, "kg_m3": kg / vol.max(1e-9), "volume": vol,
             "impossible": impossible, "strip_fails": strip, "asw_max": asw_max, "thicknesses": hs,
             "max": mx,
-            "worst": { "x": wc[0], "y": wc[1], "z": wc[2], "h": m.shells[worst].mat.h, "as": fields[worst].map(|x| x * 1e4) },
+            "worst": { "x": wc[0], "y": wc[1], "z": wc[2], "h": m.shells[worst].mat.h, "as": fields[worst].map(|x| x * 1e4), "diag": diag },
         });
         self.last_underground = Some((m, fields));
         Ok(summary)
