@@ -103,6 +103,9 @@ pub struct Prepared {
     structure_pairs: Vec<(usize, usize, f64)>,
 }
 
+/// Зона поперечной арматуры продавливания: объём = площадь на метр контура × u × h × это число.
+pub const PUNCH_ZONE: f64 = 1.5;
+
 /// Наибольшая доля свай на пределе Fu в одном сочетании для допустимого варианта
 /// (решение пользователя 2026-11-02).
 pub const CAPPED_SHARE_MAX: f64 = 0.10;
@@ -151,6 +154,8 @@ pub struct Punching {
     pub rbt: f64,
     /// Рабочая высота плиты, м.
     pub h0: f64,
+    /// Rsw поперечной арматуры, кПа.
+    pub rsw: f64,
     /// Контур плиты (часть расчётного контура вне плиты не учитывается).
     pub raft: Region,
 }
@@ -194,6 +199,8 @@ pub struct Evaluation {
     pub util_punch: f64,
     /// Наибольший Кисп продавливания плиты колоннами, торцами и углами стен (0 — не проверялось).
     pub util_punch_struct: f64,
+    /// Поперечная арматура продавливания, кг/м³ плиты (включена в `kg_m3`).
+    pub punch_kg_m3: f64,
     /// Определяющая конструкция: вид, точка, сила F (кН, за вычетом свай), предел Rbt·u·h0 (кН).
     pub punch_struct_worst: Option<(String, [f64; 2], f64, f64)>,
     /// Среднее расстояние от свай до ближайшей существующей сваи, м (NaN — ориентира нет).
@@ -218,7 +225,7 @@ pub struct ConditionalModel {
 impl Evaluation {
     /// Наибольший Кисп из ограничений (для сравнения недопустимых вариантов).
     pub fn worst(&self, lim: &SettlementLimits) -> f64 {
-        self.util_ground.max(self.util_material).max(self.util_punch).max(self.util_punch_struct).max(self.s_max / lim.s_max).max(self.ds_rel / lim.ds_rel_max)
+        self.util_ground.max(self.util_material).max(self.util_punch / 2.0).max(self.util_punch_struct / 2.0).max(self.s_max / lim.s_max).max(self.ds_rel / lim.ds_rel_max)
     }
 }
 
@@ -438,12 +445,14 @@ impl Problem<'_> {
         };
         let mut util_punch_struct: f64 = 0.0;
         let mut punch_struct_worst = None;
+        // По загруженным площадям: наибольшие (F, Fb,ult) по сочетаниям — для поперечной арматуры.
+        let mut area_worst = vec![(0.0f64, 1.0f64); self.structure_punch.len()];
         for c in &self.uls {
             let (u, n) = solve(c)?;
             if let (Some(pp), false) = (&self.punching, self.structure_punch.is_empty()) {
                 let down = building_down(c, &u);
                 let mut q_of: HashMap<usize, [f64; 2]> = HashMap::new();
-                for a in &self.structure_punch {
+                for (ai, a) in self.structure_punch.iter().enumerate() {
                     let (f, cap) = if let Some(sh) = &a.shear {
                         // Равнодействующая поперечных сил по контуру (глобальные оси плана).
                         let mut sum = 0.0;
@@ -467,6 +476,9 @@ impl Problem<'_> {
                         (f - relief, pp.rbt * a.u * frac.max(1e-9) * pp.h0)
                     };
                     let util = f.max(0.0) / cap;
+                    if util > area_worst[ai].0 / area_worst[ai].1 {
+                        area_worst[ai] = (f.max(0.0), cap);
+                    }
                     if util > util_punch_struct {
                         util_punch_struct = util;
                         punch_struct_worst = Some((a.kind.clone(), a.at, f, cap));
@@ -525,10 +537,12 @@ impl Problem<'_> {
             steel += env[e].iter().sum::<f64>() * a;
             area += a;
         }
-        let kg_m3 = if design { steel * STEEL_DENSITY / (area * self.raft_h) } else { f64::NAN };
+        let mut kg_m3 = if design { steel * STEEL_DENSITY / (area * self.raft_h) } else { f64::NAN };
         let n_max = pile_n.iter().copied().fold(0.0, f64::max);
         let util_ground = n_max / self.pile.fd_ground;
         let util_material = n_max * self.pile.material_util_per_kn;
+        let mut punch_checks: Vec<(f64, f64, f64)> = vec![];
+        let mut punch_kg_m3 = 0.0;
         let util_punch = match &self.punching {
             None => 0.0,
             Some(p) => {
@@ -546,11 +560,33 @@ impl Problem<'_> {
                             })
                             .count() as f64
                             / 72.0;
-                        f / (p.rbt * u * inside.max(1e-9) * p.h0)
+                        let cap = p.rbt * u * inside.max(1e-9) * p.h0;
+                        punch_checks.push((f, cap, u * inside.max(1e-9)));
+                        f / cap
                     })
                     .fold(0.0, f64::max)
             }
         };
+        // Поперечная арматура продавливания (СП 63, пп. 8.1.48–8.1.50): при Fb < F ≤ 2Fb —
+        // Fsw = max(F − Fb, 0,25 Fb), qsw = Fsw / (0,8 u), площадь на метр контура qsw / Rsw;
+        // объём — × u × h × PUNCH_ZONE (зона армирования за контуром — допущение).
+        if let Some(p) = &self.punching {
+            for (ai, &(f, cap)) in area_worst.iter().enumerate() {
+                let _ = ai;
+                punch_checks.push((f, cap, cap / (p.rbt * p.h0)));
+            }
+            let mut vol = 0.0;
+            for &(f, cap, u) in &punch_checks {
+                if f > cap && f <= 2.0 * cap {
+                    let fsw = (f - cap).max(0.25 * cap);
+                    vol += fsw / (0.8 * u) / p.rsw * u * self.raft_h * PUNCH_ZONE;
+                }
+            }
+            punch_kg_m3 = vol * STEEL_DENSITY / (area * self.raft_h);
+            if design {
+                kg_m3 += punch_kg_m3;
+            }
+        }
         let shift = if self.existing.is_empty() {
             f64::NAN
         } else {
@@ -560,6 +596,7 @@ impl Problem<'_> {
             util_punch,
             util_punch_struct,
             punch_struct_worst,
+            punch_kg_m3,
             shift,
             piles: piles.to_vec(),
             pile_n,

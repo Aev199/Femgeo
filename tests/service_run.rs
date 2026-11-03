@@ -58,8 +58,14 @@ fn punching_governs_thin_raft() {
     let out = run(&mut s, i.clone());
     let v = &out["variants"][0];
     println!("h = 0,3: Кисп продавливания {}", v["util_punch"]);
-    assert!(!v["feasible"].as_bool().unwrap());
-    assert!(v["util_punch"].as_f64().unwrap() > 1.0);
+    let up = v["util_punch"].as_f64().unwrap();
+    assert!(up > 1.0);
+    // 1 < Кисп ≤ 2 — допустимо с поперечной арматурой (её масса — в расходе), больше 2 — нет.
+    if up <= 2.0 {
+        assert!(v["punch_kg_m3"].as_f64().unwrap() > 0.0);
+    } else {
+        assert!(!v["feasible"].as_bool().unwrap());
+    }
     // Проверка формулы на наиболее нагруженной свае: u = π(d + h0) × доля внутри плиты.
     let (rbt, h0, d) = (1150.0, 0.25, 0.6);
     let n_max = v["piles"].as_array().unwrap().iter().map(|p| p["n"].as_f64().unwrap()).fold(0.0, f64::max);

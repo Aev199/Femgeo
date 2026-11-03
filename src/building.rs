@@ -54,8 +54,8 @@ pub enum StructureKind {
     Column { b: f64, h: f64 },
     /// Торец стены толщиной t; `dir` — направление вдоль стены от торца.
     WallEnd { t: f64, dir: [f64; 2] },
-    /// Угол стены толщиной t (излом цепочки больше 30°).
-    WallCorner { t: f64 },
+    /// Угол стены толщиной t (излом цепочки больше 30°); d1, d2 — направления ветвей от угла.
+    WallCorner { t: f64, d1: [f64; 2], d2: [f64; 2] },
 }
 
 #[derive(Clone, Debug)]
@@ -335,7 +335,7 @@ fn find_structures(bm: &Model, interface: &[(usize, usize)], raft_xyz: &[V3], h:
             let (u, v) = (unit(xy(r), xy(nb[0])), unit(xy(r), xy(nb[1])));
             // Прямая стена: направления противоположны (cos ≈ −1); излом больше 30°.
             if u[0] * v[0] + u[1] * v[1] > -(30f64.to_radians().cos()) {
-                out.push(Structure { kind: StructureKind::WallCorner { t }, node: r, nodes: part(r) });
+                out.push(Structure { kind: StructureKind::WallCorner { t, d1: u, d2: v }, node: r, nodes: part(r) });
             }
         }
     }

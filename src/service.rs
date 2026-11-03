@@ -499,13 +499,13 @@ impl Service {
             m => return Err(format!("неизвестная модель свай «{m}»")),
         };
         // Продавливание вертикальными конструкциями (сетка здания): загруженные площади и контуры
-        // на h0/2 (СП 63, п. 8.1.46); торцы и углы стен — участок длиной h0 (допущение).
+        // на h0/2 (СП 63, п. 8.1.46); торцы и углы стен — СП 430.1325800.2018, п. 6.3.8, рис. 6.1–6.2.
         let h0 = r.h - r.cover;
         let structure_punch: Vec<crate::optimize::PunchArea> = match (&split, input.punching) {
             (Some(s), true) => s
                 .structures
                 .iter()
-                .map(|st| {
+                .flat_map(|st| {
                     let p = s.raft.nodes[st.node];
                     let c = [p[0], p[1]];
                     let mut nodes: Vec<usize> = st.nodes.iter().map(|&k| to_grid[k]).collect();
@@ -518,12 +518,13 @@ impl Service {
                             (0..k).map(move |j| { let t = (j as f64 + 0.5) / k as f64; [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])] })
                         }).collect()
                     };
-                    // Контур из отрезков (начало, конец, наружная нормаль) — для торцов и углов стен.
-                    let mut segs: Vec<([f64; 2], [f64; 2], [f64; 2])> = vec![];
-                    let (kind, u, inside) = match st.kind {
+                    // Расчётные контуры: (вид, длина, область внутри, отрезки (начало, конец, наружная нормаль)
+                    // для силы по поперечным силам плиты — торцы и углы стен).
+                    type Seg = ([f64; 2], [f64; 2], [f64; 2]);
+                    let checks: Vec<(&str, f64, Vec<[f64; 2]>, Vec<Seg>)> = match st.kind {
                         crate::building::StructureKind::Column { b, h } => {
                             let (hx, hy) = ((b + h0) / 2.0, (h + h0) / 2.0);
-                            ("column", 2.0 * (b + h) + 4.0 * h0, rect(c[0] - hx, c[0] + hx, c[1] - hy, c[1] + hy))
+                            vec![("column", 2.0 * (b + h) + 4.0 * h0, rect(c[0] - hx, c[0] + hx, c[1] - hy, c[1] + hy), vec![])]
                         }
                         crate::building::StructureKind::WallEnd { t, dir } => {
                             // СП 430, п. 6.3.8: участок у торца на h0/2 и два вдоль стены той же длины t + h0.
@@ -532,38 +533,43 @@ impl Service {
                             let w = l / 2.0;
                             let q = |s: f64, n: f64| [c[0] + s * dir[0] + n * nrm[0], c[1] + s * dir[1] + n * nrm[1]];
                             let (s0, s1) = (-h0 / 2.0, -h0 / 2.0 + l);
-                            segs.push((q(s0, -w), q(s0, w), [-dir[0], -dir[1]]));
-                            segs.push((q(s0, w), q(s1, w), nrm));
-                            segs.push((q(s0, -w), q(s1, -w), [-nrm[0], -nrm[1]]));
-                            ("wall_end", 3.0 * l, vec![q(s0, -w), q(s1, -w), q(s1, w), q(s0, w)])
+                            let segs = vec![(q(s0, -w), q(s0, w), [-dir[0], -dir[1]]), (q(s0, w), q(s1, w), nrm), (q(s0, -w), q(s1, -w), [-nrm[0], -nrm[1]])];
+                            vec![("wall_end", 3.0 * l, vec![q(s0, -w), q(s1, -w), q(s1, w), q(s0, w)], segs)]
                         }
-                        crate::building::StructureKind::WallCorner { t } => {
-                            // Угол: два наружных участка по t + h0 вдоль ветвей (допущение до сверки с рис. 6.2
-                            // СП 430); направление «наружу» — от центра тяжести узлов угла.
-                            let l = t + h0;
-                            let g = st.nodes.iter().fold([0.0, 0.0], |a, &k| [a[0] + s.raft.nodes[k][0] / st.nodes.len() as f64, a[1] + s.raft.nodes[k][1] / st.nodes.len() as f64]);
-                            let out = [c[0] - g[0], c[1] - g[1]];
-                            let sx = if out[0] >= 0.0 { 1.0 } else { -1.0 };
-                            let sy = if out[1] >= 0.0 { 1.0 } else { -1.0 };
-                            let o = [c[0] + sx * l / 2.0, c[1] + sy * l / 2.0];
-                            segs.push((o, [o[0] - sx * l, o[1]], [0.0, sy]));
-                            segs.push((o, [o[0], o[1] - sy * l], [sx, 0.0]));
-                            ("wall_corner", 2.0 * l, rect(c[0] - l / 2.0, c[0] + l / 2.0, c[1] - l / 2.0, c[1] + l / 2.0))
+                        crate::building::StructureKind::WallCorner { t, d1, d2 } => {
+                            // СП 430, рис. 6.2 (a1 = a2 = t): наружный контур — два участка a1 + a2 на h0/2 от
+                            // наружных граней; внутренний — диагональ во входящем углу.
+                            let pt = |o: [f64; 2], k1: f64, k2: f64| [o[0] + k1 * d1[0] + k2 * d2[0], o[1] + k1 * d1[1] + k2 * d2[1]];
+                            let e = t / 2.0 + h0 / 2.0;
+                            let o = pt(c, -e, -e);
+                            let outer = vec![(o, pt(o, 2.0 * t, 0.0), [-d2[0], -d2[1]]), (o, pt(o, 0.0, 2.0 * t), [-d1[0], -d1[1]])];
+                            let i = pt(c, t / 2.0, t / 2.0);
+                            let (p1, p2) = (pt(i, h0 / 2.0, h0 / 2.0 + t), pt(i, h0 / 2.0 + t, h0 / 2.0));
+                            let dn = [d1[0] + d2[0], d1[1] + d2[1]];
+                            let ln = (dn[0] * dn[0] + dn[1] * dn[1]).sqrt().max(1e-12);
+                            let inner = vec![(p1, p2, [dn[0] / ln, dn[1] / ln])];
+                            let area = vec![o, pt(o, 2.0 * t, 0.0), p2, p1, pt(o, 0.0, 2.0 * t)];
+                            vec![("wall_corner_outer", 4.0 * t, area.clone(), outer), ("wall_corner_inner", (2.0f64).sqrt() * t, area, inner)]
                         }
                     };
-                    let samples = along(inside.clone(), 18);
-                    // Точки контура в элементах плиты (вне плиты — не учитываются).
-                    let shear = (!segs.is_empty()).then(|| {
-                        let k = 12;
-                        segs.iter()
-                            .flat_map(|&(a, b, nrm)| {
-                                let ds = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / k as f64;
-                                (0..k).map(move |j| { let t = (j as f64 + 0.5) / k as f64; ([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], nrm, ds) })
-                            })
-                            .filter_map(|(p, nrm, ds)| element_at(&raft, p).map(|e| (e, nrm, ds)))
-                            .collect()
-                    });
-                    crate::optimize::PunchArea { kind: kind.into(), at: c, nodes, u, samples, inside: Region { outer: inside, holes: vec![] }, shear }
+                    checks
+                        .into_iter()
+                        .map(|(kind, u, inside, segs)| {
+                            let samples = along(inside.clone(), 18);
+                            // Точки контура в элементах плиты (вне плиты — не учитываются).
+                            let shear = (!segs.is_empty()).then(|| {
+                                let k = 12;
+                                segs.iter()
+                                    .flat_map(|&(a, b, nrm)| {
+                                        let ds = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt() / k as f64;
+                                        (0..k).map(move |j| { let t = (j as f64 + 0.5) / k as f64; ([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], nrm, ds) })
+                                    })
+                                    .filter_map(|(p, nrm, ds)| element_at(&raft, p).map(|e| (e, nrm, ds)))
+                                    .collect()
+                            });
+                            crate::optimize::PunchArea { kind: kind.into(), at: c, nodes: nodes.clone(), u, samples, inside: Region { outer: inside, holes: vec![] }, shear }
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .collect(),
             _ => vec![],
@@ -592,7 +598,7 @@ impl Service {
             building: building.as_ref(),
             crack_short: crack_short.as_ref(),
             crack_long: crack_long.as_ref(),
-            punching: input.punching.then(|| Punching { rbt: c_uls.rbt, h0: r.h - r.cover, raft: Region { outer: r.outline.clone(), holes: r.holes.clone() } }),
+            punching: input.punching.then(|| Punching { rbt: c_uls.rbt, h0: r.h - r.cover, rsw: RSW_PUNCH, raft: Region { outer: r.outline.clone(), holes: r.holes.clone() } }),
             existing: input.existing.clone(),
             pile_fu: input.pile_fu,
             conditional,
@@ -680,6 +686,10 @@ fn element_at(m: &Model, p: [f64; 2]) -> Option<usize> {
     })
 }
 
+/// Rsw поперечной арматуры продавливания, кПа: А500 — 300 МПа (СП 63, табл. 6.15; по памяти,
+/// сверить), класс арматуры не задаётся.
+const RSW_PUNCH: f64 = 300_000.0;
+
 fn polygon_area(p: &[[f64; 2]]) -> f64 {
     let n = p.len();
     (0..n).map(|i| p[i][0] * p[(i + 1) % n][1] - p[(i + 1) % n][0] * p[i][1]).sum::<f64>().abs() / 2.0
@@ -698,6 +708,7 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bo
             "reference": has_reference && i == 0,
             "util_punch": v.util_punch,
             "util_punch_struct": v.util_punch_struct,
+            "punch_kg_m3": v.punch_kg_m3,
             "punch_struct_worst": v.punch_struct_worst.as_ref().map(|w| json!({ "kind": w.0, "x": w.1[0], "y": w.1[1], "f": w.2, "cap": w.3 })),
             "shift": if v.shift.is_finite() { json!(v.shift) } else { Value::Null },
             "count": v.piles.len(),
