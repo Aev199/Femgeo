@@ -99,6 +99,37 @@ pub fn required_uls(n: f64, m: f64, table: &UlsTable) -> DesignResult {
     }
 
     if let Some(a1) = bisect(|at| eta(at, 0.0) <= 1.0, as_max) {
+        // Отступление от источника (OpenCS): при растяжении с малым эксцентриситетом (растянуты
+        // обе грани) одна грань проходит лишь при нереально большой площади — сравниваем с
+        // двусторонним армированием (золотое сечение по As_c ∈ [0, a1]) и берём меньшую сумму.
+        if n > 0.0 {
+            let g = |ac: f64| -> (f64, f64) {
+                match bisect(|x| eta(x, ac) <= 1.0, as_max) {
+                    Some(v) => (ac + v, v),
+                    None => (f64::INFINITY, as_max),
+                }
+            };
+            const GR: f64 = 0.6180339887498949;
+            let (mut lo, mut hi) = (0.0, a1);
+            let mut best = (a1, a1, 0.0);
+            while hi - lo > REL_TOL * a1.max(1e-9) {
+                let (c, d) = (hi - GR * (hi - lo), lo + GR * (hi - lo));
+                let (fc, fd) = (g(c), g(d));
+                for (ac, fv) in [(c, fc), (d, fd)] {
+                    if fv.0 < best.0 {
+                        best = (fv.0, fv.1, ac);
+                    }
+                }
+                if fc.0 <= fd.0 {
+                    hi = d;
+                } else {
+                    lo = c;
+                }
+            }
+            if best.0 < a1 * (1.0 - 1e-6) {
+                return DesignResult::new(best.1, best.2, tension_top, DesignStatus::WithCompression, eta(best.1, best.2));
+            }
+        }
         return DesignResult::new(a1, 0.0, tension_top, DesignStatus::TensionOnly, eta(a1, 0.0));
     }
 

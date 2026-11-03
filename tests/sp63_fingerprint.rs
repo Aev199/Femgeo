@@ -39,7 +39,7 @@ fn fingerprint() -> u64 {
 #[test]
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn design_fingerprint_is_unchanged() {
-    assert_eq!(format!("{:016x}", fingerprint()), "45291358643b36ac");
+    assert_eq!(format!("{:016x}", fingerprint()), "c183670aad503860");
 }
 
 /// Параллельный пакетный подбор совпадает с последовательным побитово.
