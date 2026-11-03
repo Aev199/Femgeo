@@ -243,6 +243,8 @@ impl Evaluation {
 }
 
 const STEEL_DENSITY: f64 = 7850.0;
+/// Наименьший коэффициент релаксации поправки податливости в `refine_nonlinear`.
+const NL_RELAX_MIN: f64 = 0.125;
 
 impl Problem<'_> {
     /// Узлы плиты, допустимые для свай.
@@ -282,29 +284,48 @@ impl Problem<'_> {
     /// s_нл,i = D_i·(F·N)_i. F' = F + diag(δ), δ_i = (s_нл,i − (F·N)_i)/N_i —
     /// нелинейность у ствола и острия своей сваи, взаимовлияние — упругое (F'·N = s_нл); плита
     /// пересчитывается с F', пока нагрузки на сваи не изменятся меньше чем на `tol` (доля
-    /// наибольшей), не более `max_iter` раз. Несходимость — ошибка (результат не определён).
+    /// наибольшей) и осадки модели не совпадут с нелинейными с той же точностью; поправка —
+    /// с релаксацией по сваям (ω = 1, при смене знака — вдвое меньше); не более `max_iter` раз. Несходимость — ошибка (результат не определён).
     pub fn refine_nonlinear(&self, piles: &[usize], f_lin: &[f64], settle: &mut dyn FnMut(&[f64]) -> Result<Vec<f64>, String>, tol: f64, max_iter: usize) -> Result<(Evaluation, usize), String> {
         let n = piles.len();
         let mut e = self.evaluate_flex(piles, f_lin)?;
+        let mut delta = vec![0.0; n];
+        let mut omega = vec![1.0f64; n];
+        let mut last_step = vec![0.0f64; n];
         for it in 1..=max_iter {
             let load = e.pile_n_sls.clone();
             let ratio = settle(&load)?;
             let mut f = f_lin.to_vec();
             let mut d = vec![1.0; n];
+            // Невязка осадок до обновления: |δ − δ_цель|·N / s_нл (доля).
+            let mut mismatch: f64 = 0.0;
             for i in 0..n {
                 let s_lin: f64 = (0..n).map(|j| f_lin[i * n + j] * load[j]).sum();
                 if load[i] > 1e-6 && s_lin > 0.0 && ratio[i].is_finite() {
                     d[i] = ratio[i];
-                    f[i * n + i] += ((ratio[i] - 1.0) * s_lin / load[i]).max(-0.5 * f_lin[i * n + i]);
+                    // Релаксация по сваям: ω = 1, при смене знака поправки ω /= 2 — без неё
+                    // итерации колеблются (добавка осадки, в том числе групповая, относится к
+                    // своей свае, и нагрузка уходит к соседям).
+                    let target = ((ratio[i] - 1.0) * s_lin / load[i]).max(-0.5 * f_lin[i * n + i]);
+                    mismatch = mismatch.max((target - delta[i]).abs() * load[i] / (ratio[i] * s_lin));
+                    let step = target - delta[i];
+                    if step * last_step[i] < 0.0 {
+                        omega[i] = (omega[i] * 0.5).max(NL_RELAX_MIN);
+                    }
+                    last_step[i] = step;
+                    delta[i] += omega[i] * step;
                 }
+                f[i * n + i] += delta[i];
             }
             let mut next = self.evaluate_flex(piles, &f)?;
             next.nl_factor = d;
             let scale = load.iter().fold(0.0f64, |a, x| a.max(x.abs())).max(1e-9);
             let change = load.iter().zip(&next.pile_n_sls).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max) / scale;
-            if std::env::var("FEMGEO_DBG").is_ok() { eprintln!("DBG it {it} change {change:.4}"); }
+            if std::env::var("FEMGEO_DBG").is_ok() {
+                eprintln!("DBG it {it} change {change:.4} mismatch {mismatch:.4}");
+            }
             e = next;
-            if change < tol {
+            if change < tol && mismatch < tol {
                 return Ok((e, it));
             }
         }

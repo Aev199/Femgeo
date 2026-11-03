@@ -287,7 +287,7 @@ fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// Нелинейное основание: шагов нагрузки, допуск по нагрузкам на сваи, наибольшее число итераций.
 const NL_STEPS: usize = 10;
 const NL_TOL: f64 = 0.02;
-const NL_MAX_ITER: usize = 6;
+const NL_MAX_ITER: usize = 12;
 
 #[derive(Default)]
 pub struct Service {

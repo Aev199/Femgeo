@@ -201,6 +201,9 @@ fn nonlinear_coupling_model_law() {
     };
     let (e, it) = p.refine_nonlinear(&grid, &f, &mut settle, 0.01, 10).unwrap();
     let e1 = p.evaluate_flex(&grid, &f).unwrap();
+    if std::env::var("FEMGEO_DBG").is_ok() {
+        eprintln!("N_sls {:?}\nN {:?}", e1.pile_n_sls.iter().map(|x| x.round()).collect::<Vec<_>>(), e1.pile_n.iter().map(|x| x.round()).collect::<Vec<_>>());
+    }
     let sum: f64 = e.pile_n.iter().sum();
     println!("итераций {it}, угол/центр: линейно {:.3}, нелинейно {:.3}; s {:.4} → {:.4}", corner_ratio(&p, &grid, &e1), corner_ratio(&p, &grid, &e), e1.s_max, e.s_max);
     assert!((sum - Q * A * A).abs() < 1e-3 * Q * A * A);
@@ -236,7 +239,7 @@ fn raft_on_nonlinear_soil() {
         assert!(r.complete, "срыв");
         Ok(r.s.iter().zip(&r.s_el).map(|(a, b)| a / b).collect())
     };
-    let (e, it) = p.refine_nonlinear(&grid, &f.flexibility, &mut settle, 0.02, 6).unwrap();
+    let (e, it) = p.refine_nonlinear(&grid, &f.flexibility, &mut settle, 0.02, 12).unwrap();
     let (lo, hi) = e.nl_factor.iter().fold((f64::MAX, 0.0f64), |a, &d| (a.0.min(d), a.1.max(d)));
     println!("итераций {it}, {t:.0} с; D {lo:.3}–{hi:.3}; угол/центр {:.3} → {:.3}; s {:.4} → {:.4}", corner_ratio(&p, &grid, &e1), corner_ratio(&p, &grid, &e), e1.s_max, e.s_max);
     let sum: f64 = e.pile_n.iter().sum();
