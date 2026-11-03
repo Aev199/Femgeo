@@ -545,7 +545,12 @@ impl Service {
                                 let se = se + h0 / 80.0;
                                 let s2 = t;
                                 let segs2 = vec![(q(se, w), q(s2, w), nrm), (q(se, -w), q(s2, -w), [-nrm[0], -nrm[1]])];
+                                // Контур 1′ — для стены, подходящей торцом к краю; у стены вдоль края (участок
+                                // грани вне плиты) он не применяется, остаётся контур 1, открытый к краю.
+                                let inside = |a: [f64; 2], b: [f64; 2]| (0..10).filter(|&k| { let t = (k as f64 + 0.5) / 10.0; region.contains([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]) }).count() >= 5;
+                                if segs2.iter().all(|sg| inside(sg.0, sg.1)) {
                                 v.push(("wall_end_edge", 2.0 * (s2 - se), vec![q(se, -w), q(s2, -w), q(s2, w), q(se, w)], segs2, vec![nrm]));
+                                }
                             }
                             v
                         }
