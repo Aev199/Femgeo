@@ -769,7 +769,11 @@ impl Problem<'_> {
             soil_3d: flex.is_some(),
             feasible: false,
         };
-        ev.feasible = !impossible && !overloaded && capped_share <= CAPPED_SHARE_MAX + 1e-12 && ev.worst(&self.limits) <= 1.0;
+        // На 3D-основании (внешняя F) перегрузка краевых и угловых свай закономерна и не причина
+        // отказа (решение 2026-11-04): сваи держат Fu, избыток перераспределяется, доля таких
+        // свай не ограничивается.
+        let capped_ok = flex.is_some() || capped_share <= CAPPED_SHARE_MAX + 1e-12;
+        ev.feasible = !impossible && !overloaded && capped_ok && ev.worst(&self.limits) <= 1.0;
         Ok(ev)
     }
 

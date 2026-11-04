@@ -692,13 +692,11 @@ pub struct PileCurve {
 }
 
 impl PileCurve {
-    /// D при силе n (линейно между точками); None — вне кривой (срыв или несходимость раньше).
+    /// D при силе n (линейно между точками). Несущая способность — ручная (Fd пользователя), не
+    /// по Кулону–Мору (решение 2026-11-04): за концом кривой — последнее D.
     pub fn ratio(&self, n: f64) -> Option<f64> {
         if n <= 0.0 {
             return Some(1.0);
-        }
-        if n > self.n_max * (1.0 + 1e-9) {
-            return None;
         }
         let mut prev = (0.0, 1.0);
         for &(f, d) in &self.points {

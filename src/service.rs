@@ -729,7 +729,7 @@ impl Service {
                         .enumerate()
                         .map(|(k, &nk)| {
                             let cv = &curves[idx[k]].1;
-                            cv.ratio(nk).ok_or_else(|| format!("свая {}: N = {nk:.0} кН больше предела кривой одиночной сваи {:.0} кН (срыв) — результат не определён", k + 1, cv.n_max))
+                            cv.ratio(nk).ok_or_else(|| format!("свая {}: кривая одиночной сваи пуста — результат не определён", k + 1))
                         })
                         .collect()
                 };
