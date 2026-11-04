@@ -250,7 +250,8 @@ fn raft_hybrid_vs_group() {
     oc.lateral = 15.0;
     oc.below = 15.0;
     let cv = aster::pile_curve(&ps[0], &soil_nl, n_top, 10, &oc).unwrap();
-    let mut settle = |n: &[f64]| -> Result<Vec<f64>, String> { n.iter().map(|&x| cv.ratio(x).ok_or("срыв".to_string())).collect() };
+    println!("кривая до {:.0} кН (нужно {n_top:.0}), полная {}", cv.n_max, cv.complete);
+    let mut settle = |n: &[f64]| -> Result<Vec<f64>, String> { n.iter().map(|&x| cv.ratio(x).ok_or(format!("срыв: {x:.0} > {:.0}", cv.n_max))).collect() };
     let (e, it) = p.refine_nonlinear(&grid, &f.flexibility, &mut settle, 0.02, 12).unwrap();
     let r = corner_ratio(&p, &grid, &e);
     println!("гибрид: {:.0} с (кривая {:.0} с), итераций {it}; кривая {:?}; s {:.4} м, угол/центр {r:.3}", t.elapsed().as_secs_f64(), cv.seconds, cv.points.iter().map(|(n, d)| (n.round(), (d * 1000.0).round() / 1000.0)).collect::<Vec<_>>(), e.s_max);

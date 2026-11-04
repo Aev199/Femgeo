@@ -12,6 +12,8 @@
 //! условного фундамента в `optimize::Problem::evaluate_flex`.
 
 use crate::piles::{Pile, SoilColumn};
+
+pub mod unstructured;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +26,18 @@ pub struct Options {
     pub workdir: PathBuf,
     /// Наибольший размер элемента в зоне свай (план и глубина), м.
     pub h: f64,
+    /// Неструктурированная сетка (Gmsh, TETRA10): мелкая у свай, крупная к границам.
+    pub unstructured: bool,
+    /// Gmsh: размер элемента у ствола сваи (доля d), в зоне свай (м) и на границах модели (м).
+    pub h_pile: f64,
+    pub h_zone: f64,
+    pub h_far: f64,
+    /// Рост размера элемента от ствола сваи, м на метр расстояния.
+    pub grow: f64,
+    /// Python с модулем gmsh.
+    pub python: PathBuf,
+    /// Допуск привязки центров свай к общим линиям сетки, м (смещение сваи ≤ snap/2…snap).
+    pub snap: f64,
     /// Наибольший размер элемента по глубине в пределах длины свай, м.
     pub hz: f64,
     /// Рост размера элемента вне зоны свай: h + (g − 1)·расстояние.
@@ -60,7 +74,7 @@ impl Options {
         let b = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(0.0);
         let l = piles.iter().map(|p| p.length).fold(0.0, f64::max);
         let r = l.max(b);
-        Self { run_aster, workdir, h: 1.0, hz: 2.0, grade: 1.3, lateral: r, below: r, quadratic: true, quadratic_nl: true, ncpus: 4, memory_mb: 12_000, time_limit_s: 7200 }
+        Self { run_aster, workdir, h: 1.0, snap: 0.5, unstructured: true, h_pile: 1.0, h_zone: 3.0, h_far: 10.0, grow: 0.5, python: std::env::var_os("FEMGEO_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3")), hz: 2.0, grade: 1.3, lateral: r, below: r, quadratic: true, quadratic_nl: true, ncpus: 4, memory_mb: 12_000, time_limit_s: 7200 }
     }
 }
 
@@ -108,7 +122,36 @@ fn nu_geostatic(l: &crate::piles::Layer) -> f64 {
 
 pub const VOID: usize = usize::MAX;
 
+/// Сетка для Code_Aster: текст `.mail` (группы MAT{m} — материалы, H{p} — узлы голов),
+/// материалы и габарит (x0, x1, y0, y1, низ).
+#[derive(Clone, Debug)]
+pub struct Model3 {
+    pub mail: String,
+    pub materials: Vec<Material>,
+    /// Группы элементов сетки каждого материала (пусто — материал не используется).
+    pub groups: Vec<Vec<String>>,
+    pub bounds: [f64; 5],
+    pub heads: usize,
+    pub nodes: usize,
+    pub elements: usize,
+    /// Элементы второго порядка уже в сетке (TETRA10) — LINE_QUAD не нужен.
+    pub quadratic: bool,
+}
+
 impl Grid {
+    /// Сетка Code_Aster из структурированной сетки (HEXA8; HEXA20 — LINE_QUAD в командном файле).
+    pub fn model(&self) -> Model3 {
+        Model3 {
+            mail: mail(self),
+            materials: self.materials.clone(),
+            groups: (0..self.materials.len()).map(|m| if self.mat.contains(&m) { vec![format!("MAT{m}")] } else { vec![] }).collect(),
+            bounds: [self.x[0], *self.x.last().unwrap(), self.y[0], *self.y.last().unwrap(), self.z[0]],
+            heads: self.heads.len(),
+            nodes: self.n_nodes(),
+            elements: self.n_elems(),
+            quadratic: false,
+        }
+    }
     pub fn node(&self, i: usize, j: usize, k: usize) -> usize {
         (k * self.y.len() + j) * self.x.len() + i
     }
@@ -132,6 +175,26 @@ impl Grid {
         }
         false
     }
+}
+
+/// Группы координат: соседние по возрастанию в пределах `tol` от первой в группе — одна
+/// координата (среднее); смещение не больше `tol`.
+fn snap(v: &[f64], tol: f64) -> Vec<f64> {
+    let mut ord: Vec<usize> = (0..v.len()).collect();
+    ord.sort_by(|&a, &b| v[a].total_cmp(&v[b]));
+    let mut out = v.to_vec();
+    let mut k = 0;
+    while k < ord.len() {
+        let start = v[ord[k]];
+        let mut e = k;
+        while e + 1 < ord.len() && v[ord[e + 1]] - start <= tol {
+            e += 1;
+        }
+        let m = ord[k..=e].iter().map(|&i| v[i]).sum::<f64>() / (e - k + 1) as f64;
+        ord[k..=e].iter().for_each(|&i| out[i] = m);
+        k = e + 1;
+    }
+    out
 }
 
 /// Сторона квадрата равной площади для круглой сваи диаметром d.
@@ -187,6 +250,15 @@ fn layer_at(col: &SoilColumn, z: f64) -> Option<crate::piles::Layer> {
 
 
 /// Сетка для свай `piles` (одна отметка голов) и грунта `soil`.
+/// Сетка расчёта: неструктурированная (Gmsh, по умолчанию) или структурированная с оголовками.
+pub fn model(piles: &[Pile], soil: &dyn Fn(f64, f64) -> SoilColumn, o: &Options) -> Result<Model3, String> {
+    if o.unstructured {
+        unstructured::model(piles, soil, o)
+    } else {
+        Ok(grid_with(piles, soil, o, true)?.model())
+    }
+}
+
 pub fn grid(piles: &[Pile], soil: &dyn Fn(f64, f64) -> SoilColumn, o: &Options) -> Result<Grid, String> {
     grid_with(piles, soil, o, false)
 }
@@ -200,11 +272,16 @@ pub fn grid_with(piles: &[Pile], soil: &dyn Fn(f64, f64) -> SoilColumn, o: &Opti
     if piles.iter().any(|p| (p.head - head).abs() > 1e-6) {
         return Err("3D-модель: головы свай на разных отметках не поддерживаются".into());
     }
+    // Центры свай — на общие линии сетки (группы координат в пределах `o.snap`): при свободной
+    // расстановке на нерегулярной сетке плиты иначе у каждой сваи свои линии X и Y.
+    let sx = snap(&piles.iter().map(|p| p.x).collect::<Vec<_>>(), o.snap);
+    let sy = snap(&piles.iter().map(|p| p.y).collect::<Vec<_>>(), o.snap);
     let sq: Vec<[f64; 5]> = piles
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let b = square_side(p.d);
-            [p.x - b / 2.0, p.x + b / 2.0, p.y - b / 2.0, p.y + b / 2.0, p.head - p.length]
+            [sx[i] - b / 2.0, sx[i] + b / 2.0, sy[i] - b / 2.0, sy[i] + b / 2.0, p.head - p.length]
         })
         .collect();
     let (x0, x1) = (sq.iter().map(|s| s[0]).fold(f64::MAX, f64::min), sq.iter().map(|s| s[1]).fold(f64::MIN, f64::max));
@@ -322,7 +399,7 @@ pub fn mail(g: &Grid) -> String {
     let list = |s: &mut String, name: &str, kind: &str, ids: &mut dyn Iterator<Item = usize>| {
         let _ = writeln!(s, "{kind}\n{name}");
         for (c, id) in ids.enumerate() {
-            let _ = write!(s, "{}{}{}", if kind == "GROUP_MA" { "M" } else { "N" }, id + 1, if c % 10 == 9 { "\n" } else { " " });
+            let _ = write!(s, "{}{}{}", if kind == "GROUP_MA" { "M" } else { "N" }, id + 1, if c % 8 == 7 { "\n" } else { " " });
         }
         s.push_str("\nFINSF\n");
     };
@@ -340,13 +417,13 @@ pub fn mail(g: &Grid) -> String {
 
 /// Общая часть командного файла: сетка, модель, материалы, закрепления, узлы голов. `nl` —
 /// нелинейный расчёт: плотность ρ = γ/g и Кулон–Мор для грунта.
-fn comm_head(g: &Grid, quadratic: bool, nl: bool) -> Result<String, String> {
+fn comm_head(g: &Model3, quadratic: bool, nl: bool) -> Result<String, String> {
     let mut s = String::from("import numpy as np\nDEBUT(LANG='EN')\nmesh = LIRE_MAILLAGE(FORMAT='ASTER', UNITE=20)\n");
-    if quadratic {
+    if quadratic && !g.quadratic {
         s.push_str("mesh = CREA_MAILLAGE(MAILLAGE=mesh, LINE_QUAD=_F(TOUT='OUI'))\n");
     }
     // Граничные узлы (в том числе средние узлы рёбер) — по плоскостям.
-    let (x0, x1, y0, y1, z0) = (g.x[0], *g.x.last().unwrap(), g.y[0], *g.y.last().unwrap(), g.z[0]);
+    let [x0, x1, y0, y1, z0] = g.bounds;
     let plane = |name: &str, p: [f64; 3], n: [f64; 3]| format!("_F(NOM='{name}', OPTION='PLAN', POINT=({}, {}, {}), VECT_NORMALE=({}, {}, {}), PRECISION=1e-4)", p[0], p[1], p[2], n[0], n[1], n[2]);
     let _ = writeln!(
         s,
@@ -358,14 +435,15 @@ fn comm_head(g: &Grid, quadratic: bool, nl: bool) -> Result<String, String> {
         plane("YHI", [x0, y1, z0], [0.0, 1.0, 0.0])
     );
     s.push_str("mod = AFFE_MODELE(MAILLAGE=mesh, AFFE=_F(TOUT='OUI', PHENOMENE='MECANIQUE', MODELISATION='3D'))\n");
-    let used: Vec<usize> = (0..g.materials.len()).filter(|m| g.mat.contains(m)).collect();
+    let used: Vec<usize> = (0..g.materials.len()).filter(|&m| !g.groups[m].is_empty()).collect();
     s.push_str("aff = []\naff0 = []\nsoil_groups = []\npile_groups = []\n");
     for &m in &used {
         let Material { e, nu, gamma, phi, c, pile, e0, nu0 } = g.materials[m];
+        let _ = writeln!(s, "G{m} = ({},)", g.groups[m].iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", "));
         if !nl {
             let _ = writeln!(s, "m{m} = DEFI_MATERIAU(ELAS=_F(E={e:e}, NU={nu}))");
         } else if pile {
-            let _ = writeln!(s, "m{m} = DEFI_MATERIAU(ELAS=_F(E={e:e}, NU={nu}, RHO={}))\npile_groups.append('MAT{m}')", gamma / G);
+            let _ = writeln!(s, "m{m} = DEFI_MATERIAU(ELAS=_F(E={e:e}, NU={nu}, RHO={}))\npile_groups.extend(G{m})", gamma / G);
         } else {
             if !(gamma > 0.0) || !(phi > 0.0 || c > 0.0) {
                 return Err(format!("нелинейный грунт: у слоя E {e} не заданы γ и φ/c"));
@@ -374,14 +452,14 @@ fn comm_head(g: &Grid, quadratic: bool, nl: bool) -> Result<String, String> {
             // (вершина конуса на поверхности при c = 0 — расходимость).
             let _ = writeln!(
                 s,
-                "m{m} = DEFI_MATERIAU(ELAS=_F(E={e:e}, NU={nu}, RHO={}), MOHR_COULOMB=_F(PHI={phi}, ANGDIL=0.0, COHESION={}))\nsoil_groups.append('MAT{m}')",
+                "m{m} = DEFI_MATERIAU(ELAS=_F(E={e:e}, NU={nu}, RHO={}), MOHR_COULOMB=_F(PHI={phi}, ANGDIL=0.0, COHESION={}))\nsoil_groups.extend(G{m})",
                 gamma / G,
                 c.max(MC_C_MIN)
             );
         }
-        let _ = writeln!(s, "aff.append(_F(GROUP_MA='MAT{m}', MATER=m{m}))");
+        let _ = writeln!(s, "aff.append(_F(GROUP_MA=G{m}, MATER=m{m}))");
         if nl {
-            let _ = writeln!(s, "g{m} = DEFI_MATERIAU(ELAS=_F(E={e0:e}, NU={nu0}, RHO={}))\naff0.append(_F(GROUP_MA='MAT{m}', MATER=g{m}))", gamma / G);
+            let _ = writeln!(s, "g{m} = DEFI_MATERIAU(ELAS=_F(E={e0:e}, NU={nu0}, RHO={}))\naff0.append(_F(GROUP_MA=G{m}, MATER=g{m}))", gamma / G);
         }
     }
     s.push_str("cm = AFFE_MATERIAU(MAILLAGE=mesh, AFFE=aff)\n");
@@ -390,7 +468,7 @@ fn comm_head(g: &Grid, quadratic: bool, nl: bool) -> Result<String, String> {
     }
     // Закрепления — исключением (AFFE_CHAR_CINE): быстрее множителей Лагранжа, результат тот же.
     s.push_str("bc = AFFE_CHAR_CINE(MODELE=mod, MECA_IMPO=(_F(GROUP_NO='BOTTOM', DX=0, DY=0, DZ=0), _F(GROUP_NO=('XLO', 'XHI'), DX=0), _F(GROUP_NO=('YLO', 'YHI'), DY=0)))\n");
-    let _ = writeln!(s, "heads = [list(mesh.getNodes('H%d' % p)) for p in range({})]", g.heads.len());
+    let _ = writeln!(s, "heads = [list(mesh.getNodes('H%d' % p)) for p in range({})]", g.heads);
     Ok(s)
 }
 
@@ -402,7 +480,7 @@ const NL_RESI: f64 = 1e-4;
 const MC_C_MIN: f64 = 1.0;
 
 /// Командный файл линейного расчёта: единичные силы на головы (одна факторизация), F в `out`.
-pub fn comm(g: &Grid, out: &Path, quadratic: bool) -> String {
+pub fn comm(g: &Model3, out: &Path, quadratic: bool) -> String {
     let mut s = comm_head(g, quadratic, false).unwrap();
     s.push_str(
         "ke = CALC_MATR_ELEM(OPTION='RIGI_MECA', MODELE=mod, CHAM_MATER=cm)\n\
@@ -429,7 +507,7 @@ pub fn comm(g: &Grid, out: &Path, quadratic: bool) -> String {
 /// K0 = 1 − sin φ); 2) от этого напряжённого состояния (перемещения — с нуля) —
 /// силы `loads` (кН, сжатие > 0) на головы, `steps` шагов, грунт — Кулон–Мор. В `out` —
 /// строки «время, осадки голов» по шагам (м).
-pub fn comm_nl(g: &Grid, loads: &[f64], steps: usize, out: &Path, quadratic: bool) -> Result<String, String> {
+pub fn comm_nl(g: &Model3, loads: &[f64], steps: usize, out: &Path, quadratic: bool) -> Result<String, String> {
     let mut s = comm_head(g, quadratic, true)?;
     let n: Vec<String> = loads.iter().map(|v| format!("{v:e}")).collect();
     let _ = writeln!(s, "N = [{}]", n.join(", "));
@@ -444,7 +522,7 @@ sig0 = CREA_CHAMP(OPERATION='EXTR', TYPE_CHAM='ELGA_SIEF_R', RESULTAT=res0, NOM_
 ramp = DEFI_FONCTION(NOM_PARA='INST', VALE=(1.0, 0.0, 2.0, 1.0))
 L = DEFI_LIST_REEL(DEBUT=1.0, INTERVALLE=_F(JUSQU_A=2.0, NOMBRE=STEPS))
 LI = DEFI_LIST_INST(DEFI_LIST=_F(LIST_INST=L), ECHEC=_F(ACTION='DECOUPE', SUBD_NIVEAU=5, SUBD_PAS=4))
-comp = [_F(GROUP_MA=tuple(soil_groups), RELATION='MOHR_COULOMB')]
+comp = [_F(GROUP_MA=tuple(soil_groups), RELATION='MOHR_COULOMB', ITER_INTE_MAXI=200, ITER_INTE_PAS=10)]
 if pile_groups:
     comp.append(_F(GROUP_MA=tuple(pile_groups), RELATION='ELAS'))
 # Упругое решение на той же сетке (для отношения s_нл/s_упр, не зависящего от сетки).
@@ -480,13 +558,13 @@ FIN()
 }
 
 /// Запуск Code_Aster в `o.workdir`: сетка, командный файл; возвращает текст `out` и время, с.
-fn execute(o: &Options, g: &Grid, comm_text: &dyn Fn(&Path) -> Result<String, String>, out_name: &str, strict: bool) -> Result<(String, f64), String> {
+fn execute(o: &Options, g: &Model3, comm_text: &dyn Fn(&Path) -> Result<String, String>, out_name: &str, strict: bool) -> Result<(String, f64), String> {
     std::fs::create_dir_all(&o.workdir).map_err(|e| format!("{}: {e}", o.workdir.display()))?;
     let wd = o.workdir.canonicalize().map_err(|e| e.to_string())?;
     let out = wd.join(out_name);
     let _ = std::fs::remove_file(&out);
     let w = |name: &str, text: &str| std::fs::write(wd.join(name), text).map_err(|e| format!("{name}: {e}"));
-    w("model.mail", &mail(g))?;
+    w("model.mail", &g.mail)?;
     w("model.comm", &comm_text(&out)?)?;
     w(
         "model.export",
@@ -542,7 +620,7 @@ pub fn settlements_nl(piles: &[Pile], soil: &dyn Fn(f64, f64) -> SoilColumn, loa
     if loads.len() != piles.len() {
         return Err("число сил не равно числу свай".into());
     }
-    let g = grid_with(piles, soil, o, true)?;
+    let g = model(piles, soil, o)?;
     let (text, seconds) = execute(o, &g, &|out| comm_nl(&g, loads, steps.max(1), out, o.quadratic_nl), "settle.txt", false)?;
     let v = numbers(&text)?;
     let n = piles.len();
@@ -570,7 +648,7 @@ pub struct Flex3d {
 
 /// Матрица податливости свай на 3D-основании (запуск Code_Aster).
 pub fn flexibility(piles: &[Pile], soil: &dyn Fn(f64, f64) -> SoilColumn, o: &Options) -> Result<Flex3d, String> {
-    let g = grid_with(piles, soil, o, true)?;
+    let g = model(piles, soil, o)?;
     let (text, seconds) = execute(o, &g, &|out| Ok(comm(&g, out, o.quadratic)), "flex.txt", true)?;
     let v = numbers(&text)?;
     let n = piles.len();
@@ -591,7 +669,7 @@ pub fn flexibility(piles: &[Pile], soil: &dyn Fn(f64, f64) -> SoilColumn, o: &Op
             f[j * n + i] = m;
         }
     }
-    Ok(Flex3d { flexibility: f, asymmetry: asym, nodes: g.n_nodes(), elements: g.n_elems(), seconds })
+    Ok(Flex3d { flexibility: f, asymmetry: asym, nodes: g.nodes, elements: g.elements, seconds })
 }
 
 /// Кривая «нагрузка — осадка» одиночной сваи на упругопластическом основании (гибридный метод:
@@ -627,7 +705,12 @@ impl PileCurve {
 }
 
 /// Кривая одиночной сваи `pile` до силы `n_max`, `steps` шагов (Code_Aster, Кулон–Мор).
+/// Сетка — структурированная HEXA20: на TETRA10 интегрирование Кулона–Мора в Code_Aster 18.1.8
+/// срывается задолго до предела (одиночная свая d 0,6: 2,5 МН против 5,4 МН на HEXA20).
 pub fn pile_curve(pile: &Pile, soil: &dyn Fn(f64, f64) -> SoilColumn, n_max: f64, steps: usize, o: &Options) -> Result<PileCurve, String> {
+    let mut o = o.clone();
+    o.unstructured = false;
+    let o = &o;
     let r = settlements_nl(std::slice::from_ref(pile), soil, &[n_max], steps, o)?;
     let flex = r.s_el[0] / n_max;
     if !(flex > 0.0) {

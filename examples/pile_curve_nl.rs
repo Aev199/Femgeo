@@ -9,6 +9,8 @@ fn main() {
     let ps = [Pile { x: 0.0, y: 0.0, head: -0.8, length: 15.0, d, ea: 3.0e7 * std::f64::consts::PI * d * d / 4.0 }];
     let mut o = Options::new(Options::find_run_aster().unwrap(), std::env::temp_dir().join("femgeo_pile_curve"), &ps);
     o.quadratic_nl = std::env::var("LIN").is_err();
+    if let Ok(v) = std::env::var("HP") { o.h_pile = v.parse().unwrap(); }
+    if std::env::var("HEX").is_ok() { o.unstructured = false; }
     let f = aster::flexibility(&ps, &soil, &o).unwrap();
     println!("F11 {:.4e}, {:.1}s", f.flexibility[0], f.seconds);
     let n = a.first().copied().unwrap_or(2000.0);
