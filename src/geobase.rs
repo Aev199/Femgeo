@@ -20,6 +20,11 @@ pub struct Soil {
     /// Модуль деформации, кПа.
     pub e: Option<f64>,
     pub nu: Option<f64>,
+    /// Удельный вес, кН/м³ (γ (0,85), т/м³ × 9,81), угол трения, град (ϕ (0,85)), сцепление, кПа
+    /// (с (0,85)) — значения для расчётов по II группе; из выбранной модели, иначе из любой.
+    pub gamma: Option<f64>,
+    pub phi: Option<f64>,
+    pub c: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +48,16 @@ pub struct Object {
 
 const E_KEYS: [&str; 2] = ["Е", "E"];
 const NU_KEYS: [&str; 3] = ["ν", "nu", "v"];
+const GAMMA_KEYS: [&str; 4] = ["γ (0,85)", "γ (0.85)", "γ", "γII"];
+const PHI_KEYS: [&str; 6] = ["ϕ (0,85)", "φ (0,85)", "ϕ (0.85)", "φ (0.85)", "ϕ", "φ"];
+const C_KEYS: [&str; 6] = ["с (0,85)", "c (0,85)", "с (0.85)", "c (0.85)", "с", "c"];
+/// g, м/с²: γ в geobase — т/м³.
+const G: f64 = 9.81;
+
+/// Первое по порядку ключей заданное значение.
+fn pick(props: &[(String, f64)], keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|k| props.iter().find(|(n, _)| n == k).map(|(_, v)| *v))
+}
 
 impl Object {
     /// Открыть объект. `model` — имя модели грунта (`ConstitutiveModels.name`); None — первая
@@ -53,6 +68,7 @@ impl Object {
         let q = |e: rusqlite::Error| format!("geobase: {e}");
 
         let mut props: HashMap<(String, i64), (Option<f64>, Option<f64>)> = HashMap::new();
+        let mut all: HashMap<(String, i64), Vec<(String, f64)>> = HashMap::new();
         let mut st = c
             .prepare("SELECT m.name, p.soil_id, p.property_name, p.property_value FROM SoilProperties p JOIN ConstitutiveModels m ON m.id = p.model_id")
             .map_err(q)?;
@@ -61,6 +77,9 @@ impl Object {
             .map_err(q)?;
         for row in rows {
             let (m, soil, name, value) = row.map_err(q)?;
+            if let Some(v) = value {
+                all.entry((m.clone(), soil)).or_default().push((name.trim().to_string(), v));
+            }
             let entry = props.entry((m, soil)).or_default();
             let name = name.trim();
             if E_KEYS.contains(&name) {
@@ -83,7 +102,16 @@ impl Object {
         for row in st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))).map_err(q)? {
             let (id, name) = row.map_err(q)?;
             let (e, nu) = props.get(&(model.clone(), id)).copied().unwrap_or((None, None));
-            soils.insert(id, Soil { id, name, e, nu });
+            let get = |keys: &[&str]| -> Option<f64> {
+                all.get(&(model.clone(), id)).and_then(|p| pick(p, keys)).or_else(|| {
+                    let mut other: Vec<(&String, &Vec<(String, f64)>)> = all.iter().filter(|((_, s), _)| *s == id).map(|((m, _), p)| (m, p)).collect();
+                    other.sort_by(|a, b| a.0.cmp(b.0));
+                    other.into_iter().find_map(|(_, p)| pick(p, keys))
+                })
+            };
+            let gamma = get(&GAMMA_KEYS).map(|g| g * G);
+            let (phi, c) = (get(&PHI_KEYS), get(&C_KEYS));
+            soils.insert(id, Soil { id, name, e, nu, gamma, phi, c });
         }
 
         let mut boreholes = Vec::new();
@@ -122,7 +150,7 @@ impl Object {
             let (Some(e), Some(nu)) = (s.e, s.nu) else {
                 return Err(format!("ИГЭ «{}»: в модели «{}» не заданы E и ν", s.name, self.model));
             };
-            layers.push(Layer { bottom: b.z - depth, e, nu, gamma: 0.0, phi: 0.0, c: 0.0 });
+            layers.push(Layer { bottom: b.z - depth, e, nu, gamma: s.gamma.unwrap_or(0.0), phi: s.phi.unwrap_or(0.0), c: s.c.unwrap_or(0.0) });
             top_depth = depth;
         }
         if layers.is_empty() {

@@ -85,7 +85,21 @@ pub struct PileInput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum SoilInput {
-    Geobase { path: String, model: Option<String> },
+    /// Объект geobase: отметки и координаты скважин — абсолютные; `z0` — абсолютная отметка нуля
+    /// модели (отметка модели = абсолютная − z0), `dx`, `dy` — координаты начала осей модели в
+    /// системе geobase; `borehole` — одна скважина для всего поля (иначе — ближайшая).
+    Geobase {
+        path: String,
+        model: Option<String>,
+        #[serde(default)]
+        z0: f64,
+        #[serde(default)]
+        dx: f64,
+        #[serde(default)]
+        dy: f64,
+        #[serde(default)]
+        borehole: Option<String>,
+    },
     Layers { top: f64, layers: Vec<Layer> },
 }
 
@@ -378,7 +392,8 @@ impl Service {
                 let c = SoilColumn { top: *top, layers: layers.clone() };
                 Ok(Box::new(move |_, _| c.clone()))
             }
-            SoilInput::Geobase { path, model } => {
+            SoilInput::Geobase { path, model, z0, dx, dy, borehole } => {
+                let (z0, dx, dy) = (*z0, *dx, *dy);
                 let reopen = !matches!(&self.geobase, Some((p, o)) if p == path && model.as_deref().is_none_or(|m| m == o.model));
                 if reopen {
                     let o = geobase::Object::open(Path::new(path), model.as_deref())?;
@@ -386,10 +401,22 @@ impl Service {
                 }
                 let o = self.geobase.as_ref().unwrap().1.clone();
                 // Колонки скважин — заранее, ошибки ИГЭ — сразу.
-                let cols: Vec<([f64; 2], SoilColumn)> =
-                    o.boreholes.iter().map(|b| o.column(b).map(|c| ([b.x, b.y], c))).collect::<Result<_, _>>()?;
+                let shift = |mut c: SoilColumn| {
+                    c.top -= z0;
+                    c.layers.iter_mut().for_each(|l| l.bottom -= z0);
+                    c
+                };
+                let cols: Vec<([f64; 2], SoilColumn)> = o
+                    .boreholes
+                    .iter()
+                    .filter(|b| borehole.as_deref().is_none_or(|n| b.name == n))
+                    .map(|b| o.column(b).map(|c| ([b.x - dx, b.y - dy], shift(c))))
+                    .collect::<Result<_, _>>()?;
                 if cols.is_empty() {
-                    return Err("geobase: в объекте нет скважин".into());
+                    return Err(match borehole {
+                        Some(n) => format!("geobase: нет скважины «{n}»"),
+                        None => "geobase: в объекте нет скважин".into(),
+                    });
                 }
                 Ok(Box::new(move |x, y| {
                     cols.iter().min_by(|a, b| ((a.0[0] - x).powi(2) + (a.0[1] - y).powi(2)).total_cmp(&((b.0[0] - x).powi(2) + (b.0[1] - y).powi(2)))).unwrap().1.clone()

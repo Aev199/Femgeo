@@ -140,9 +140,13 @@ pub fn html(input: &Input, raft: &Model, vs: &[Evaluation], i: usize, reference:
     row(&mut s, "acrc,ult продолж. / непродолж.", &format!("{} / {}", crack(input.acrc_long), crack(input.acrc_short)));
     row(&mut s, "Продавливание", if input.punching { "проверяется" } else { "не проверяется" });
     let soil = match &input.soil {
-        SoilInput::Geobase { path, model } => {
+        SoilInput::Geobase { path, model, z0, borehole, .. } => {
             let file = std::path::Path::new(path).file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
-            format!("geobase «{}», модель {} (колонка ближайшей скважины)", esc(&file), esc(model.as_deref().unwrap_or("по умолчанию")))
+            let bh = match borehole {
+                Some(b) => format!("скважина «{}»", esc(b)),
+                None => "колонка ближайшей скважины".into(),
+            };
+            format!("geobase «{}», модель {} ({bh}; γ, φ, с — для II группы, 0,85), ноль модели — абс. {} м", esc(&file), esc(model.as_deref().unwrap_or("по умолчанию")), f(*z0, 2))
         }
         SoilInput::Layers { top, layers } => format!("слои вручную, верх {} м, слоёв {}", f(*top, 2), layers.len()),
     };

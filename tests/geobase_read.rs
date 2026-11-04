@@ -15,7 +15,9 @@ fn db(dir: &std::path::Path) -> std::path::PathBuf {
          INSERT INTO Soils (id, name) VALUES (1, 'Суглинок'), (2, 'Песок');
          INSERT INTO ConstitutiveModels (id, name) VALUES (1, 'Mohr-Coulomb'), (2, 'Hardening Soil');
          INSERT INTO SoilProperties (soil_id, model_id, property_name, property_value) VALUES
-           (1, 1, 'Е', 12000), (1, 1, 'ν', 0.35), (2, 1, 'E', 30000), (2, 1, 'ν', 0.3), (1, 2, 'E50', 9000);
+           (1, 1, 'Е', 12000), (1, 1, 'ν', 0.35), (2, 1, 'E', 30000), (2, 1, 'ν', 0.3), (1, 2, 'E50', 9000),
+           (1, 1, 'γ (0,85)', 1.95), (1, 1, 'ϕ (0,85)', 22), (1, 1, 'с (0,85)', 25), (1, 1, 'с (0,95)', 18),
+           (2, 2, 'γ (0,85)', 1.8), (2, 2, 'ϕ (0,85)', 32);
          INSERT INTO boreholes (id, name, x_coord, y_coord, z_coord) VALUES (1, 'Скв-1', 0, 0, 150.0), (2, 'Скв-2', 100, 0, 148.0);
          INSERT INTO borehole_layers (borehole_id, layer_number, soil_id, depth) VALUES
            (1, 1, 1, 0.0), (1, 2, 1, 6.0), (1, 3, 2, 30.0), (2, 1, 1, 4.0), (2, 2, 2, 25.0);",
@@ -37,6 +39,9 @@ fn reads_columns_by_nearest_borehole() {
     assert_eq!(c.layers.len(), 2);
     assert_eq!((c.layers[0].bottom, c.layers[0].e, c.layers[0].nu), (144.0, 12000.0, 0.35));
     assert_eq!((c.layers[1].bottom, c.layers[1].e), (120.0, 30000.0));
+    // γ, ϕ, с (0,85) — γ из т/м³ в кН/м³; у песка — из другой модели, с не задано — 0.
+    assert!((c.layers[0].gamma - 1.95 * 9.81).abs() < 1e-9 && c.layers[0].phi == 22.0 && c.layers[0].c == 25.0);
+    assert!((c.layers[1].gamma - 1.8 * 9.81).abs() < 1e-9 && c.layers[1].phi == 32.0 && c.layers[1].c == 0.0);
     let c2 = o.column_at(80.0, 0.0).unwrap();
     assert_eq!(c2.top, 148.0);
     // Модель без ν — понятная ошибка.
