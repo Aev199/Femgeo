@@ -679,6 +679,7 @@ impl Service {
         progress("подбор расстановки");
         let mut report = |e: &crate::optimize::Evaluation| progress(&format!("вариант: {} свай, {:.1} кг/м³", e.piles.len(), e.kg_m3));
         let mut variants = if input.layout == "free" { problem.frontier(n_start, 8, &mut report)? } else { problem.regular(&mut report)? };
+        let mut notes_3d: Vec<String> = vec![];
         if input.refine_3d > 0 {
             let exe = crate::aster::Options::find_run_aster().ok_or("3D-основание: не найден run_aster (FEMGEO_ASTER)")?;
             let mut fin: Vec<usize> = (0..variants.len()).filter(|&i| variants[i].feasible).collect();
@@ -733,6 +734,18 @@ impl Service {
                         .collect()
                 };
                 let e = problem.refine_nonlinear(&variants[i].piles, &f.flexibility, &mut settle, NL_TOL, NL_MAX_ITER)?.0;
+                progress(&format!(
+                    "3D-основание: {} свай — {}; s {:.0} мм, Δs/L {:.4}, на пределе Fu {:.0} %, Кисп грунт {:.2}, продавливание {:.2}/{:.2}, D до {:.3}",
+                    e.piles.len(),
+                    if e.feasible { "допустим" } else { "недопустим" },
+                    e.s_max * 1e3,
+                    e.ds_rel,
+                    e.capped_share * 100.0,
+                    e.util_ground,
+                    e.util_punch,
+                    e.util_punch_struct,
+                    e.nl_factor.iter().cloned().fold(1.0, f64::max)
+                ));
                 Ok(e)
             };
             // Поиск наименьшего числа свай, допустимого на 3D-основании (допустимость считается
@@ -745,7 +758,15 @@ impl Service {
             let mut lo: Option<usize> = None;
             let mut cur = 0usize;
             while cur < fin.len() && runs < budget {
-                let e = eval3d(fin[cur], runs)?;
+                let e = match eval3d(fin[cur], runs) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        // Ошибка расчёта (память, несходимость) — результат не определён, поиск
+                        // прекращается, уже найденное сохраняется.
+                        notes_3d.push(format!("3D-основание, {} свай: результат не определён ({err})", variants[fin[cur]].piles.len()));
+                        break;
+                    }
+                };
                 runs += 1;
                 let feasible = e.feasible;
                 found.push((cur, e));
@@ -764,7 +785,13 @@ impl Service {
             if let (Some(mut l), Some(mut h)) = (lo, ok_at) {
                 while h - l > 1 && runs < budget {
                     let mid = (l + h) / 2;
-                    let e = eval3d(fin[mid], runs)?;
+                    let e = match eval3d(fin[mid], runs) {
+                        Ok(e) => e,
+                        Err(err) => {
+                            notes_3d.push(format!("3D-основание, {} свай: результат не определён ({err})", variants[fin[mid]].piles.len()));
+                            break;
+                        }
+                    };
                     runs += 1;
                     let feasible = e.feasible;
                     found.push((mid, e));
@@ -777,8 +804,12 @@ impl Service {
                 }
             }
             drop(eval3d);
+            for n in &notes_3d {
+                progress(n);
+            }
             if ok_at.is_none() {
                 progress("3D-основание: допустимый вариант не найден");
+                notes_3d.push("3D-основание: допустимый вариант не найден в пределах числа расчётов".into());
             }
             found.sort_by_key(|f| f.0);
             variants.extend(found.into_iter().map(|f| f.1));
@@ -790,8 +821,9 @@ impl Service {
             variants.insert(0, r);
         }
         let mut out = result_json(&raft, &variants, &input, has_reference);
+        out["notes"] = json!(notes_3d);
         if let Some(s) = &split {
-            out["notes"] = json!(s.notes);
+            out["notes"] = json!(s.notes.iter().cloned().chain(notes_3d.iter().cloned()).collect::<Vec<_>>());
             // Вертикальные конструкции: узлы сопряжения здания с плитой (X, Y).
             let mut st: Vec<[f64; 2]> = s.building.as_ref().map_or(vec![], |b| b.block.dofs.iter().step_by(3).map(|d| { let p = s.raft.nodes[d / 6]; [p[0], p[1]] }).collect());
             st.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
