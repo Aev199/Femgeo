@@ -122,8 +122,8 @@ pub struct Input {
     /// "conditional" — одинаковая, по осадке условного фундамента (нужны γ и φ слоёв).
     #[serde(default = "sp24")]
     pub pile_model: String,
-    /// Этап 3: число финалистов (допустимые варианты с наименьшим числом свай), пересчитываемых
-    /// на 3D-основании в Code_Aster — всегда Кулон–Мор (решение 2026-11-04; нужны γ, φ, c слоёв):
+    /// Этап 3: наибольшее число расчётов на 3D-основании при поиске наименьшего числа свай,
+    /// допустимого на нём (деление пополам по допустимым вариантам фронта); расчёт — в Code_Aster — всегда Кулон–Мор (решение 2026-11-04; нужны γ, φ, c слоёв):
     /// упругая F свай, затем секущая поправка по нелинейному расчёту под ПС2 (SPEC 4.1); 0 — нет.
     #[serde(default)]
     pub refine_3d: usize,
@@ -683,10 +683,11 @@ impl Service {
             let exe = crate::aster::Options::find_run_aster().ok_or("3D-основание: не найден run_aster (FEMGEO_ASTER)")?;
             let mut fin: Vec<usize> = (0..variants.len()).filter(|&i| variants[i].feasible).collect();
             fin.sort_by(|&a, &b| variants[a].piles.len().cmp(&variants[b].piles.len()).then(variants[a].kg_m3.total_cmp(&variants[b].kg_m3)));
-            fin.truncate(input.refine_3d.min(3));
+            fin.dedup_by_key(|i| variants[*i].piles.len());
             let mut curves: Vec<(SoilColumn, crate::aster::PileCurve)> = vec![];
-            for (k, &i) in fin.iter().enumerate() {
-                progress(&format!("3D-основание: финалист {} из {} ({} свай)", k + 1, fin.len(), variants[i].piles.len()));
+            let mut found: Vec<(usize, Evaluation)> = vec![];
+            let mut eval3d = |i: usize, k: usize| -> Result<Evaluation, String> {
+                progress(&format!("3D-основание: {} свай (расчёт {})", variants[i].piles.len(), k + 1));
                 let ps = problem.piles_of(&variants[i].piles);
                 let mut o = crate::aster::Options::new(exe.clone(), std::env::temp_dir().join(format!("femgeo_aster_{}_{k}", std::process::id())), &ps);
                 // Низ модели — граница сжимаемой толщи условного фундамента (СП 22, σzp = 0,5σzg),
@@ -732,8 +733,51 @@ impl Service {
                         .collect()
                 };
                 let e = problem.refine_nonlinear(&variants[i].piles, &f.flexibility, &mut settle, NL_TOL, NL_MAX_ITER)?.0;
-                variants.push(e);
+                Ok(e)
+            };
+            // Поиск наименьшего числа свай, допустимого на 3D-основании: делением пополам по
+            // допустимым вариантам фронта (допустимость считается монотонной по числу свай),
+            // не больше `refine_3d` расчётов.
+            let budget = input.refine_3d.max(1);
+            let (mut lo, mut hi) = (0usize, fin.len().saturating_sub(1));
+            let mut runs = 0;
+            let mut ok_at: Option<usize> = None;
+            if !fin.is_empty() {
+                let e = eval3d(fin[lo], runs)?;
+                runs += 1;
+                let feasible = e.feasible;
+                found.push((lo, e));
+                if feasible {
+                    ok_at = Some(lo);
+                } else if hi > lo && runs < budget {
+                    let e = eval3d(fin[hi], runs)?;
+                    runs += 1;
+                    let feasible = e.feasible;
+                    found.push((hi, e));
+                    if feasible {
+                        ok_at = Some(hi);
+                        while hi - lo > 1 && runs < budget {
+                            let mid = (lo + hi) / 2;
+                            let e = eval3d(fin[mid], runs)?;
+                            runs += 1;
+                            let feasible = e.feasible;
+                            found.push((mid, e));
+                            if feasible {
+                                hi = mid;
+                                ok_at = Some(mid);
+                            } else {
+                                lo = mid;
+                            }
+                        }
+                    }
+                }
             }
+            drop(eval3d);
+            if ok_at.is_none() {
+                progress("3D-основание: допустимый вариант не найден");
+            }
+            found.sort_by_key(|f| f.0);
+            variants.extend(found.into_iter().map(|f| f.1));
         }
         // Существующая расстановка — первой строкой, для сравнения.
         let reference = problem.reference()?;
