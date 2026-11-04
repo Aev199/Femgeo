@@ -684,24 +684,47 @@ impl Service {
             let mut fin: Vec<usize> = (0..variants.len()).filter(|&i| variants[i].feasible).collect();
             fin.sort_by(|&a, &b| variants[a].piles.len().cmp(&variants[b].piles.len()).then(variants[a].kg_m3.total_cmp(&variants[b].kg_m3)));
             fin.truncate(input.refine_3d.min(3));
+            let mut curves: Vec<(SoilColumn, crate::aster::PileCurve)> = vec![];
             for (k, &i) in fin.iter().enumerate() {
                 progress(&format!("3D-основание: финалист {} из {} ({} свай)", k + 1, fin.len(), variants[i].piles.len()));
                 let ps = problem.piles_of(&variants[i].piles);
                 let o = crate::aster::Options::new(exe.clone(), std::env::temp_dir().join(format!("femgeo_aster_{}_{k}", std::process::id())), &ps);
                 let f = crate::aster::flexibility(&ps, soil.as_ref(), &o)?;
-                let e = {
-                    let mut run = 0;
-                    let mut settle = |n: &[f64]| -> Result<Vec<f64>, String> {
-                        run += 1;
-                        progress(&format!("3D-основание: нелинейный расчёт, итерация {run}"));
-                        let r = crate::aster::settlements_nl(&ps, soil.as_ref(), n, NL_STEPS, &o)?;
-                        if !r.complete {
-                            return Err(format!("нелинейное основание: срыв или несходимость на доле нагрузки {:.2} — результат не определён", r.curve.last().map_or(0.0, |c| c.0)));
+                // Гибридный метод: нелинейность — по кривой одиночной сваи своей грунтовой колонки
+                // (Code_Aster, Кулон–Мор, до 1,5·max N ПС2 упругого расчёта), взаимовлияние —
+                // упругое по F. Полный групповой нелинейный расчёт — часы, здесь не используется.
+                let e0 = problem.evaluate_flex(&variants[i].piles, &f.flexibility)?;
+                let n_top = 1.5 * e0.pile_n_sls.iter().cloned().fold(0.0, f64::max);
+                let cols: Vec<SoilColumn> = ps.iter().map(|p| soil(p.x, p.y)).collect();
+                let mut idx = vec![0usize; ps.len()];
+                for (k, c) in cols.iter().enumerate() {
+                    let j = match curves.iter().position(|(cc, cv): &(SoilColumn, crate::aster::PileCurve)| cc == c && cv.n_max >= n_top * (1.0 - 1e-9) || cc == c && !cv.complete) {
+                        Some(j) => j,
+                        None => {
+                            progress(&format!("3D-основание: кривая одиночной сваи ({} из колонок)", curves.len() + 1));
+                            let col = c.clone();
+                            let one = |_: f64, _: f64| col.clone();
+                            let mut oc = o.clone();
+                            oc.workdir = o.workdir.join(format!("pile{}", curves.len()));
+                            oc.lateral = ps[k].length;
+                            oc.below = ps[k].length;
+                            let cv = crate::aster::pile_curve(&ps[k], &one, n_top, NL_STEPS, &oc)?;
+                            curves.push((c.clone(), cv));
+                            curves.len() - 1
                         }
-                        Ok(r.s.iter().zip(&r.s_el).map(|(a, b)| a / b).collect())
                     };
-                    problem.refine_nonlinear(&variants[i].piles, &f.flexibility, &mut settle, NL_TOL, NL_MAX_ITER)?.0
+                    idx[k] = j;
+                }
+                let mut settle = |n: &[f64]| -> Result<Vec<f64>, String> {
+                    n.iter()
+                        .enumerate()
+                        .map(|(k, &nk)| {
+                            let cv = &curves[idx[k]].1;
+                            cv.ratio(nk).ok_or_else(|| format!("свая {}: N = {nk:.0} кН больше предела кривой одиночной сваи {:.0} кН (срыв) — результат не определён", k + 1, cv.n_max))
+                        })
+                        .collect()
                 };
+                let e = problem.refine_nonlinear(&variants[i].piles, &f.flexibility, &mut settle, NL_TOL, NL_MAX_ITER)?.0;
                 variants.push(e);
             }
         }

@@ -593,3 +593,47 @@ pub fn flexibility(piles: &[Pile], soil: &dyn Fn(f64, f64) -> SoilColumn, o: &Op
     }
     Ok(Flex3d { flexibility: f, asymmetry: asym, nodes: g.n_nodes(), elements: g.n_elems(), seconds })
 }
+
+/// Кривая «нагрузка — осадка» одиночной сваи на упругопластическом основании (гибридный метод:
+/// нелинейность — у своей сваи по этой кривой, взаимовлияние — упругое по F).
+#[derive(Clone, Debug)]
+pub struct PileCurve {
+    /// Сила, кН, и отношение осадок D = s_нл / s_упр (s_упр = N·податливость той же сетки).
+    pub points: Vec<(f64, f64)>,
+    /// Наибольшая сила, до которой расчёт сошёлся, кН; `complete` — дошёл до заданной.
+    pub n_max: f64,
+    pub complete: bool,
+    pub seconds: f64,
+}
+
+impl PileCurve {
+    /// D при силе n (линейно между точками); None — вне кривой (срыв или несходимость раньше).
+    pub fn ratio(&self, n: f64) -> Option<f64> {
+        if n <= 0.0 {
+            return Some(1.0);
+        }
+        if n > self.n_max * (1.0 + 1e-9) {
+            return None;
+        }
+        let mut prev = (0.0, 1.0);
+        for &(f, d) in &self.points {
+            if n <= f {
+                return Some(prev.1 + (d - prev.1) * (n - prev.0) / (f - prev.0));
+            }
+            prev = (f, d);
+        }
+        Some(prev.1)
+    }
+}
+
+/// Кривая одиночной сваи `pile` до силы `n_max`, `steps` шагов (Code_Aster, Кулон–Мор).
+pub fn pile_curve(pile: &Pile, soil: &dyn Fn(f64, f64) -> SoilColumn, n_max: f64, steps: usize, o: &Options) -> Result<PileCurve, String> {
+    let r = settlements_nl(std::slice::from_ref(pile), soil, &[n_max], steps, o)?;
+    let flex = r.s_el[0] / n_max;
+    if !(flex > 0.0) {
+        return Err("кривая сваи: недопустимая упругая осадка".into());
+    }
+    let points: Vec<(f64, f64)> = r.curve.iter().filter(|(t, _)| *t > 1e-9).map(|(t, s)| (t * n_max, s[0] / (t * n_max * flex))).collect();
+    let n_reached = points.last().map_or(0.0, |p| p.0);
+    Ok(PileCurve { points, n_max: n_reached, complete: r.complete, seconds: r.seconds })
+}

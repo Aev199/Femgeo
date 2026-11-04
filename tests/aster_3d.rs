@@ -225,16 +225,48 @@ fn nonlinear_coupling_model_law() {
     }
 }
 
-/// Нелинейное основание в Code_Aster: та же плита, грунт с γ, φ, c.
+fn soil_nl(_: f64, _: f64) -> SoilColumn {
+    SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 19.0, phi: 22.0, c: 15.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 19.5, phi: 30.0, c: 5.0 }] }
+}
+
+/// Гибридный метод (кривая одиночной сваи + упругое взаимовлияние) против полного группового
+/// нелинейного расчёта той же плиты (`raft_on_nonlinear_soil`: s 46,2 мм, угол/центр 1,336;
+/// 11 мин). Допуски заданы до расчёта: s ±15 %, угол/центр ±5 %.
 #[test]
+fn raft_hybrid_vs_group() {
+    let Some(exe) = Options::find_run_aster() else {
+        println!("Code_Aster не найден — пропуск");
+        return;
+    };
+    let (p, grid) = problem(&soil_nl);
+    let ps = p.piles_of(&grid);
+    let o = Options::new(exe, workdir("raft_hy"), &ps);
+    let t = std::time::Instant::now();
+    let f = aster::flexibility(&ps, &soil_nl, &o).unwrap();
+    let e0 = p.evaluate_flex(&grid, &f.flexibility).unwrap();
+    let n_top = 1.5 * e0.pile_n_sls.iter().cloned().fold(0.0, f64::max);
+    let mut oc = o.clone();
+    oc.workdir = o.workdir.join("pile");
+    oc.lateral = 15.0;
+    oc.below = 15.0;
+    let cv = aster::pile_curve(&ps[0], &soil_nl, n_top, 10, &oc).unwrap();
+    let mut settle = |n: &[f64]| -> Result<Vec<f64>, String> { n.iter().map(|&x| cv.ratio(x).ok_or("срыв".to_string())).collect() };
+    let (e, it) = p.refine_nonlinear(&grid, &f.flexibility, &mut settle, 0.02, 12).unwrap();
+    let r = corner_ratio(&p, &grid, &e);
+    println!("гибрид: {:.0} с (кривая {:.0} с), итераций {it}; кривая {:?}; s {:.4} м, угол/центр {r:.3}", t.elapsed().as_secs_f64(), cv.seconds, cv.points.iter().map(|(n, d)| (n.round(), (d * 1000.0).round() / 1000.0)).collect::<Vec<_>>(), e.s_max);
+    assert!((e.s_max / 0.0462 - 1.0).abs() < 0.15, "s {}", e.s_max);
+    assert!((r / 1.336 - 1.0).abs() < 0.05, "угол/центр {r}");
+}
+
+/// Нелинейное основание в Code_Aster: та же плита, грунт с γ, φ, c (полный групповой расчёт —
+/// эталон гибридного метода; ≈ 11 мин, в обычном прогоне пропускается).
+#[test]
+#[ignore]
 fn raft_on_nonlinear_soil() {
     let Some(exe) = Options::find_run_aster() else {
         println!("Code_Aster не найден — пропуск");
         return;
     };
-    fn soil_nl(_: f64, _: f64) -> SoilColumn {
-        SoilColumn { top: 0.0, layers: vec![Layer { bottom: -8.0, e: 15_000.0, nu: 0.3, gamma: 19.0, phi: 22.0, c: 15.0 }, Layer { bottom: -60.0, e: 40_000.0, nu: 0.3, gamma: 19.5, phi: 30.0, c: 5.0 }] }
-    }
     let (p, grid) = problem(&soil_nl);
     let ps = p.piles_of(&grid);
     let o = Options::new(exe, workdir("raft_nl"), &ps);
