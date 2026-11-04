@@ -688,7 +688,14 @@ impl Service {
             for (k, &i) in fin.iter().enumerate() {
                 progress(&format!("3D-основание: финалист {} из {} ({} свай)", k + 1, fin.len(), variants[i].piles.len()));
                 let ps = problem.piles_of(&variants[i].piles);
-                let o = crate::aster::Options::new(exe.clone(), std::env::temp_dir().join(format!("femgeo_aster_{}_{k}", std::process::id())), &ps);
+                let mut o = crate::aster::Options::new(exe.clone(), std::env::temp_dir().join(format!("femgeo_aster_{}_{k}", std::process::id())), &ps);
+                // Низ модели — граница сжимаемой толщи условного фундамента (СП 22, σzp = 0,5σzg),
+                // если она известна; иначе max(L, B) ниже острия.
+                if let Some(cf) = &variants[i].conditional {
+                    if cf.hc > 0.0 {
+                        o.below = cf.hc;
+                    }
+                }
                 let f = crate::aster::flexibility(&ps, soil.as_ref(), &o)?;
                 // Гибридный метод: нелинейность — по кривой одиночной сваи своей грунтовой колонки
                 // (Code_Aster, Кулон–Мор, до 1,5·max N ПС2 упругого расчёта), взаимовлияние —
