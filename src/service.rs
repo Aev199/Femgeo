@@ -123,13 +123,10 @@ pub struct Input {
     #[serde(default = "sp24")]
     pub pile_model: String,
     /// Этап 3: число финалистов (допустимые варианты с наименьшим числом свай), пересчитываемых
-    /// с податливостью свай по 3D-основанию (Code_Aster); 0 — без пересчёта.
+    /// на 3D-основании в Code_Aster — всегда Кулон–Мор (решение 2026-11-04; нужны γ, φ, c слоёв):
+    /// упругая F свай, затем секущая поправка по нелинейному расчёту под ПС2 (SPEC 4.1); 0 — нет.
     #[serde(default)]
     pub refine_3d: usize,
-    /// Финалисты — на упругопластическом основании (Кулон–Мор, нужны γ, φ, c слоёв): секущая
-    /// податливость по нелинейному расчёту под нагрузками ПС2 (SPEC 4.1).
-    #[serde(default)]
-    pub refine_3d_nonlinear: bool,
 }
 
 fn acrc_long() -> f64 {
@@ -692,7 +689,7 @@ impl Service {
                 let ps = problem.piles_of(&variants[i].piles);
                 let o = crate::aster::Options::new(exe.clone(), std::env::temp_dir().join(format!("femgeo_aster_{}_{k}", std::process::id())), &ps);
                 let f = crate::aster::flexibility(&ps, soil.as_ref(), &o)?;
-                let e = if input.refine_3d_nonlinear {
+                let e = {
                     let mut run = 0;
                     let mut settle = |n: &[f64]| -> Result<Vec<f64>, String> {
                         run += 1;
@@ -704,8 +701,6 @@ impl Service {
                         Ok(r.s.iter().zip(&r.s_el).map(|(a, b)| a / b).collect())
                     };
                     problem.refine_nonlinear(&variants[i].piles, &f.flexibility, &mut settle, NL_TOL, NL_MAX_ITER)?.0
-                } else {
-                    problem.evaluate_flex(&variants[i].piles, &f.flexibility)?
                 };
                 variants.push(e);
             }
@@ -905,7 +900,6 @@ pub fn default_input() -> Input {
         pile_fu: None,
         pile_model: sp24(),
         refine_3d: 0,
-        refine_3d_nonlinear: false,
     }
 }
 

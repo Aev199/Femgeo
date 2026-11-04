@@ -169,6 +169,12 @@ fn service_refine_3d() {
     let mut s = femgeo::service::Service::new();
     let mut input = s.dispatch("defaults", serde_json::Value::Null, &mut |_| {}).unwrap();
     input["refine_3d"] = serde_json::json!(1);
+    // Малая плита (меньше свай — короче нелинейный расчёт); грунт с γ, φ, c (Кулон–Мор).
+    input["raft"]["outline"] = serde_json::json!([[0.0, 0.0], [9.0, 0.0], [9.0, 9.0], [0.0, 9.0]]);
+    input["soil"]["layers"] = serde_json::json!([
+        { "bottom": -8.0, "e": 15000.0, "nu": 0.3, "gamma": 18.0, "phi": 20.0, "c": 20.0 },
+        { "bottom": -60.0, "e": 40000.0, "nu": 0.3, "gamma": 19.5, "phi": 30.0, "c": 5.0 }
+    ]);
     let out = s.dispatch("run", input, &mut |m| if m.starts_with("3D") { println!("{m}") }).unwrap();
     let vs = out["variants"].as_array().unwrap();
     let v3: Vec<&serde_json::Value> = vs.iter().filter(|v| v["soil_3d"] == true).collect();
@@ -183,7 +189,9 @@ fn service_refine_3d() {
     let i = vs.len() - 1;
     assert_eq!(vs[i]["soil_3d"], true);
     s.dispatch("export_report", serde_json::json!({ "path": rp, "variant": i }), &mut |_| {}).unwrap();
-    assert!(std::fs::read_to_string(&rp).unwrap().contains("3D-основании"));
+    let html = std::fs::read_to_string(&rp).unwrap();
+    assert!(html.contains("3D-основании") && html.contains("Кулон–Мор"));
+    assert!(!vs[i]["nl_factor"].as_array().unwrap().is_empty());
 }
 
 /// Связка «плита — нелинейное основание» на модельном законе s_i = (F·N)_i·(1 + N_i/Nu):
