@@ -735,40 +735,44 @@ impl Service {
                 let e = problem.refine_nonlinear(&variants[i].piles, &f.flexibility, &mut settle, NL_TOL, NL_MAX_ITER)?.0;
                 Ok(e)
             };
-            // Поиск наименьшего числа свай, допустимого на 3D-основании: делением пополам по
-            // допустимым вариантам фронта (допустимость считается монотонной по числу свай),
-            // не больше `refine_3d` расчётов.
+            // Поиск наименьшего числа свай, допустимого на 3D-основании (допустимость считается
+            // монотонной по числу свай): от наименьшего вверх с шагом ≈ 10 % числа свай, затем
+            // делением пополам между последним недопустимым и первым допустимым; не больше
+            // `refine_3d` расчётов. Большие варианты не считаются без нужды (память).
             let budget = input.refine_3d.max(1);
-            let (mut lo, mut hi) = (0usize, fin.len().saturating_sub(1));
             let mut runs = 0;
             let mut ok_at: Option<usize> = None;
-            if !fin.is_empty() {
-                let e = eval3d(fin[lo], runs)?;
+            let mut lo: Option<usize> = None;
+            let mut cur = 0usize;
+            while cur < fin.len() && runs < budget {
+                let e = eval3d(fin[cur], runs)?;
                 runs += 1;
                 let feasible = e.feasible;
-                found.push((lo, e));
+                found.push((cur, e));
                 if feasible {
-                    ok_at = Some(lo);
-                } else if hi > lo && runs < budget {
-                    let e = eval3d(fin[hi], runs)?;
+                    ok_at = Some(cur);
+                    break;
+                }
+                lo = Some(cur);
+                let target = (variants[fin[cur]].piles.len() as f64 * 1.1).ceil() as usize;
+                let next = (cur + 1..fin.len()).find(|&j| variants[fin[j]].piles.len() >= target).unwrap_or(fin.len() - 1);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
+            if let (Some(mut l), Some(mut h)) = (lo, ok_at) {
+                while h - l > 1 && runs < budget {
+                    let mid = (l + h) / 2;
+                    let e = eval3d(fin[mid], runs)?;
                     runs += 1;
                     let feasible = e.feasible;
-                    found.push((hi, e));
+                    found.push((mid, e));
                     if feasible {
-                        ok_at = Some(hi);
-                        while hi - lo > 1 && runs < budget {
-                            let mid = (lo + hi) / 2;
-                            let e = eval3d(fin[mid], runs)?;
-                            runs += 1;
-                            let feasible = e.feasible;
-                            found.push((mid, e));
-                            if feasible {
-                                hi = mid;
-                                ok_at = Some(mid);
-                            } else {
-                                lo = mid;
-                            }
-                        }
+                        h = mid;
+                        ok_at = Some(mid);
+                    } else {
+                        l = mid;
                     }
                 }
             }

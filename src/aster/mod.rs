@@ -74,8 +74,15 @@ impl Options {
         let b = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(0.0);
         let l = piles.iter().map(|p| p.length).fold(0.0, f64::max);
         let r = l.max(b);
-        Self { run_aster, workdir, h: 1.0, snap: 0.5, unstructured: true, h_pile: 1.0, h_zone: 3.0, h_far: 10.0, grow: 0.5, python: std::env::var_os("FEMGEO_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3")), hz: 2.0, grade: 1.3, lateral: r, below: r, quadratic: true, quadratic_nl: true, ncpus: 4, memory_mb: 12_000, time_limit_s: 7200 }
+        Self { run_aster, workdir, h: 1.0, snap: 0.5, unstructured: true, h_pile: 1.0, h_zone: 3.0, h_far: 10.0, grow: 0.5, python: std::env::var_os("FEMGEO_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3")), hz: 2.0, grade: 1.3, lateral: r, below: r, quadratic: true, quadratic_nl: true, ncpus: 4, memory_mb: memory_default(), time_limit_s: 7200 }
     }
+}
+
+/// Предел памяти Code_Aster — 55 % ОЗУ (остальное — процессу Femgeo): при нехватке MUMPS
+/// переходит на диск, а не завершается системой.
+fn memory_default() -> usize {
+    let kb = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| t.lines().find(|l| l.starts_with("MemTotal")).and_then(|l| l.split_whitespace().nth(1)?.parse::<usize>().ok()));
+    kb.map_or(8_000, |kb| kb / 1024 * 55 / 100)
 }
 
 /// Структурированная сетка: линии по осям, материалы элементов, узлы голов свай.
