@@ -127,6 +127,10 @@ export class Plan {
     for (const p of scene.piles || []) {
       const c = el('circle', { cx: p.x, cy: -p.y, r: p.r, fill: p.fill, class: p.over ? 'pile over' : 'pile' }, g);
       el('title', {}, c).textContent = p.title;
+      if (p.label) {
+        const t = el('text', { x: p.x, y: -p.y - p.r * 1.25, 'font-size': p.r * 0.9, 'text-anchor': 'middle', class: 'pile-label' }, g);
+        t.textContent = p.label;
+      }
     }
   }
 }

@@ -124,6 +124,13 @@ fn pile_cap_and_conditional() {
     assert!(v["capped"].as_bool().unwrap());
     assert!(cap_max <= fu * (1.0 + 1e-6) && cap_max > 0.99 * fu, "{cap_max} {fu}");
     assert!((cap_sum / lin_sum - 1.0).abs() < 0.02, "{cap_sum} {lin_sum}");
+    // Упругий спрос — до перераспределения: наибольший равен линейному, сваи сверх Fu отмечены.
+    let ps = v["piles"].as_array().unwrap();
+    let demand = ps.iter().map(|p| p["demand"].as_f64().unwrap()).fold(0.0, f64::max);
+    assert!((demand / lin_max - 1.0).abs() < 1e-6, "{demand} {lin_max}");
+    let capped = ps.iter().filter(|p| p["capped"].as_bool().unwrap()).count();
+    assert!(capped > 0 && capped == v["capped_count"].as_u64().unwrap() as usize);
+    assert!(ps.iter().all(|p| p["capped"].as_bool().unwrap() == (p["demand"].as_f64().unwrap() > fu)));
     let (_, cond_sum, v) = run(None, "conditional");
     assert!(v["conditional"]["s"].as_f64().unwrap() > 0.0);
     assert!((cond_sum / lin_sum - 1.0).abs() < 0.02);
@@ -203,4 +210,50 @@ fn underground_reinforcement() {
     let path = std::env::temp_dir().join("femgeo_underground.dxf");
     s.dispatch("export_underground_dxf", json!({ "path": path }), &mut |_| {}).unwrap();
     assert!(std::fs::read_to_string(&path).unwrap().contains("AS_TOP_X"));
+}
+
+/// Проверка заданной расстановки: тот же результат, что у существующих свай в расчёте;
+/// повторная проверка (другая расстановка) — на сохранённой подготовке, без расхождений.
+#[test]
+fn check_piles_matches_reference() {
+    use femgeo::service::{default_input, Service};
+    let mut m = Mesh::default();
+    m.raft = grid(&mut m, 0.0, 0.8, false);
+    m.cases.push((0..121).map(|n| (n, [0.0, 0.0, -60.0, 0.0, 0.0, 0.0])).collect());
+    m.cases.push((0..121).map(|n| (n, [0.0, 0.0, -10.0, 0.0, 0.0, 0.0])).collect());
+    let pts: Vec<[f64; 2]> = (0..25).map(|k| [1.0 + 2.0 * (k / 5) as f64, 1.0 + 2.0 * (k % 5) as f64]).collect();
+    m.piles = pts.iter().map(|p| ([p[0], p[1], 0.0], [0.0; 6])).collect();
+    let n_of = |v: &serde_json::Value| -> Vec<f64> { v["piles"].as_array().unwrap().iter().map(|p| p["n"].as_f64().unwrap()).collect() };
+    let mut s = Service::new();
+    let reference = s.run_mesh(default_input(), &m, &mut |_| {}).unwrap()["variants"][0].clone();
+    assert!(reference["reference"].as_bool().unwrap());
+    let mut input = default_input();
+    input.check = Some(pts.clone());
+    let first = s.run_mesh(default_input(), &m, &mut |_| {}).unwrap()["variants"].as_array().unwrap().len();
+    let out = s.run_mesh(input.clone(), &m, &mut |_| {}).unwrap();
+    // Добавлен к вариантам расчёта, отмечен как проверка.
+    let vs = out["variants"].as_array().unwrap();
+    assert_eq!(vs.len(), first + 1);
+    assert!(vs[..first].iter().all(|v| !v["checked"].as_bool().unwrap()));
+    let v = &vs[first];
+    assert!(v["checked"].as_bool().unwrap());
+    let (a, b) = (n_of(v), n_of(&reference));
+    assert!(a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-6 * y.abs().max(1.0)), "{a:?} {b:?}");
+    // Без одной сваи, точка вне плиты и слишком близкая пара — замечания.
+    let mut fewer = pts[1..].to_vec();
+    fewer.push([50.0, 50.0]);
+    input.check = Some(fewer.clone());
+    let out = s.run_mesh(input.clone(), &m, &mut |_| {}).unwrap();
+    assert_eq!(out["variants"].as_array().unwrap().len(), first + 2);
+    let last = |o: &serde_json::Value| o["variants"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last(&out)["count"], 24);
+    assert_eq!(out["check_notes"].as_array().unwrap().len(), 1);
+    // Та же расстановка с новым сервисом (без подготовки) — тот же результат.
+    let fresh = Service::new().run_mesh(input.clone(), &m, &mut |_| {}).unwrap();
+    assert_eq!(fresh["variants"].as_array().unwrap().len(), 1);
+    assert_eq!(n_of(&fresh["variants"][0]), n_of(&last(&out)));
+    fewer.push([2.0, 1.0]);
+    input.check = Some(fewer);
+    let out = s.run_mesh(input, &m, &mut |_| {}).unwrap();
+    assert!(!last(&out)["feasible"].as_bool().unwrap());
 }

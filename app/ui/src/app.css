@@ -53,6 +53,15 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 #plan .mesh { fill: none; stroke: var(--gb-divider); stroke-width: 0.5; vector-effect: non-scaling-stroke; }
 #plan .pile { stroke: var(--gb-text); stroke-width: 1; vector-effect: non-scaling-stroke; }
 #plan .pile.over { stroke: var(--gb-error); stroke-width: 2.5; }
+#plan text.pile-label { fill: var(--gb-text); }
+#variants td.warn { color: var(--gb-error); font-weight: 600; }
+#check-dialog { position: fixed; inset: 0; background: rgb(0 0 0 / 0.35); display: flex; align-items: center; justify-content: center; z-index: 20; }
+#check-dialog[hidden] { display: none; }
+#check-dialog .box { background: var(--gb-panel-bg); color: var(--gb-text); padding: 12px; border-radius: 6px; width: min(420px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; }
+#check-dialog textarea { min-height: 260px; font-family: var(--gb-font-mono, monospace); }
+#check-dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
+.legend .classes { display: flex; gap: 8px; flex-wrap: wrap; }
+.legend .classes i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; vertical-align: middle; }
 #plan .borehole { fill: var(--gb-panel-bg); stroke: var(--gb-text-muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
 #plan text { font-family: var(--gb-font); fill: var(--gb-text-muted); stroke: none; }
 #plan .existing { fill: none; stroke: var(--gb-text-grey); stroke-width: 1; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; }

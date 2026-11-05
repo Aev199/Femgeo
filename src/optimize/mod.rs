@@ -106,8 +106,8 @@ pub struct Prepared {
 /// Зона поперечной арматуры продавливания: объём = площадь на метр контура × u × h × это число.
 pub const PUNCH_ZONE: f64 = 1.5;
 
-/// Наибольшая доля свай на пределе Fu в одном сочетании для допустимого варианта
-/// (решение пользователя 2026-11-02).
+/// Доля свай на пределе Fu в одном сочетании, выше которой вариант отмечается в выдаче
+/// (решение пользователя 2026-11-02; с 2026-11-05 — метрика, не критерий допустимости).
 pub const CAPPED_SHARE_MAX: f64 = 0.10;
 
 /// Наибольшее расстояние между узлами соседних конструкций для Δs/L, м (допущение: пролёт).
@@ -193,6 +193,11 @@ pub struct Evaluation {
     pub util_material: f64,
     pub s_max: f64,
     pub ds_rel: f64,
+    /// Упругий спрос на сваи, кН: огибающая ПС1 до перераспределения по пределу Fu (без
+    /// предела — равен `pile_n`); показывает перегрузку краевых и угловых свай.
+    pub pile_demand: Vec<f64>,
+    /// Свая хотя бы в одном сочетании на пределе Fu.
+    pub pile_capped: Vec<bool>,
     /// Теоретический расход арматуры плиты, кг/м³ (огибающая по сочетаниям).
     pub kg_m3: f64,
     /// Огибающая требуемой арматуры по элементам плиты, м²/м: [верх x, верх y, низ x, низ y].
@@ -231,7 +236,18 @@ pub struct ConditionalModel {
 impl Evaluation {
     /// Наибольший Кисп из ограничений (для сравнения недопустимых вариантов).
     pub fn worst(&self, lim: &SettlementLimits) -> f64 {
-        self.util_ground.max(self.util_material).max(self.util_punch / 2.0).max(self.util_punch_struct / 2.0).max(self.s_max / lim.s_max).max(self.ds_rel / lim.ds_rel_max)
+        self.worst_hard(lim).max(self.util_ground)
+    }
+
+    /// Наибольший Кисп безусловных ограничений (критерий допустимости): материал сваи,
+    /// продавливание (до 2Fb — с поперечной арматурой), осадка, Δs/L.
+    pub fn worst_hard(&self, lim: &SettlementLimits) -> f64 {
+        self.util_material.max(self.util_punch / 2.0).max(self.util_punch_struct / 2.0).max(self.s_max / lim.s_max).max(self.ds_rel / lim.ds_rel_max)
+    }
+
+    /// Сваи с упругим спросом N/Fd выше `k` (k = 1 — перегружены, 1,2 — сильно).
+    pub fn over(&self, fd: f64, k: f64) -> usize {
+        self.pile_demand.iter().filter(|&&n| n > k * fd * (1.0 + 1e-9)).count()
     }
 }
 
@@ -407,6 +423,8 @@ impl Problem<'_> {
             Ok((u, t.iter().map(|x| -x).collect()))
         };
         let mut pile_n = vec![0.0f64; np];
+        let mut pile_demand = vec![0.0f64; np];
+        let mut pile_capped = vec![false; np];
         let mut s_max: f64 = 0.0;
         let mut ds_rel: f64 = 0.0;
         let ne = m.shells.len();
@@ -556,6 +574,14 @@ impl Problem<'_> {
                     }
                 }
             }
+            // Упругий спрос (до перераспределения по пределу Fu) и сваи на пределе.
+            for i in 0..np {
+                let lin = -c.iter().zip(&t_cases).map(|(f, t)| f * t[i]).sum::<f64>();
+                pile_demand[i] = pile_demand[i].max(lin);
+                if self.pile_fu.is_some_and(|fu| lin > fu * (1.0 + 1e-9)) {
+                    pile_capped[i] = true;
+                }
+            }
             for (i, r) in n.into_iter().enumerate() {
                 pile_n[i] = pile_n[i].max(r);
             }
@@ -672,6 +698,8 @@ impl Problem<'_> {
             shift,
             piles: piles.to_vec(),
             pile_n,
+            pile_demand,
+            pile_capped,
             util_ground,
             util_material,
             s_max,
@@ -685,7 +713,12 @@ impl Problem<'_> {
             conditional,
             feasible: false,
         };
-        ev.feasible = !impossible && !overloaded && capped_share <= CAPPED_SHARE_MAX + 1e-12 && ev.worst(&self.limits) <= 1.0;
+        // Допустимость — только безусловные ограничения (осадка, Δs/L, материал сваи,
+        // продавливание до 2Fb, подбор армирования). Перегрузка свай по грунту (краевых, угловых)
+        // и доля свай на пределе Fu — метрики варианта, не отсечение (решение 2026-11-05).
+        // Без предела Fu избыток не перераспределяется — тогда N ≤ Fd остаётся условием.
+        let ground_ok = self.pile_fu.is_some() || ev.util_ground <= 1.0;
+        ev.feasible = !impossible && !overloaded && ground_ok && ev.worst_hard(&self.limits) <= 1.0;
         Ok(ev)
     }
 
@@ -783,6 +816,50 @@ impl Problem<'_> {
             return Ok(None);
         }
         self.evaluate(&p).map(Some)
+    }
+
+    /// Проверка заданной расстановки (без подбора): точки — к ближайшим допустимым узлам
+    /// (не дальше max(min_spacing, 2·шаг сетки)). Вне допустимой области, совпадение узлов и
+    /// шаг меньше `min_spacing` — замечания; при нарушении шага вариант недопустим.
+    pub fn check(&self, pts: &[[f64; 2]]) -> Result<(Evaluation, Vec<String>), String> {
+        let cand = self.candidates();
+        let reach = self.rules.min_spacing.max(2.0 * self.mesh_step());
+        let mut notes = vec![];
+        let mut piles: Vec<usize> = vec![];
+        for (k, &p) in pts.iter().enumerate() {
+            match cand.iter().copied().min_by(|&a, &b| dist(self.xy(a), p).total_cmp(&dist(self.xy(b), p))) {
+                Some(c) if dist(self.xy(c), p) <= reach + 1e-9 => {
+                    if piles.contains(&c) {
+                        notes.push(format!("свая {} ({:.2}; {:.2}) совпала с другой — исключена", k + 1, p[0], p[1]));
+                    } else {
+                        piles.push(c);
+                    }
+                }
+                _ => notes.push(format!("свая {} ({:.2}; {:.2}) вне допустимой области — исключена", k + 1, p[0], p[1])),
+            }
+        }
+        if piles.is_empty() {
+            return Err("ни одна свая не в допустимой позиции".into());
+        }
+        let mut close = 0;
+        for i in 0..piles.len() {
+            for j in i + 1..piles.len() {
+                if dist(self.xy(piles[i]), self.xy(piles[j])) < self.rules.min_spacing - 1e-9 {
+                    close += 1;
+                }
+            }
+        }
+        let mut ev = self.evaluate(&piles)?;
+        if close > 0 {
+            notes.push(format!("пар свай с шагом меньше {:.2} м: {close}", self.rules.min_spacing));
+            ev.feasible = false;
+        }
+        Ok((ev, notes))
+    }
+
+    /// Подготовка расчёта для повторного использования (см. [`Prepared`]).
+    pub fn take_prepared(&mut self) -> Option<Prepared> {
+        self.cache.take()
     }
 
     fn spacing_ok(&self, piles: &[usize], skip: usize, cand: usize) -> bool {

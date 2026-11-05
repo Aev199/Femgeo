@@ -150,7 +150,11 @@ function preview() {
 
 // ── Результат ──
 
-const designVariants = () => state.result.variants.filter((v) => !v.reference);
+const designVariants = () => state.result.variants.filter((v) => !v.reference && !v.checked);
+
+// Классы нагрузки свай (упругий спрос N/Fd): ≤ 0,8 / ≤ 1,0 / ≤ 1,2 / > 1,2.
+const CLASSES = [[0.8, '#3aa655', '≤ 0,8'], [1.0, '#e3c22b', '0,8–1,0'], [1.2, '#ee8a26', '1,0–1,2'], [Infinity, '#d63b2f', '> 1,2']];
+const classColor = (k) => CLASSES.find((c) => k <= c[0] + 1e-9)[1];
 
 function variantTable() {
   const tbody = $('variants').tBodies[0];
@@ -159,9 +163,10 @@ function variantTable() {
     const tr = tbody.insertRow();
     tr.className = [i === state.current ? 'current' : '', v.feasible ? '' : 'infeasible', v.reference ? 'reference' : ''].join(' ');
     const util = Math.max(v.util_ground, v.util_material);
-    const cells = [[v.reference ? `${v.count} сущ.` : v.count], [fmt(v.kg_m3, 1)], [fmt(util, 2)], [v.util_punch ? fmt(v.util_punch, 2) : '—'], [fmt(v.s_max * 100, 1)], [fmt(v.ds_rel, 4)]];
-    for (const [text] of cells) {
-      const td = tr.insertCell(); td.textContent = text; td.className = 'num';
+    const cells = [[v.reference ? `${v.count} сущ.` : v.checked ? `${v.count} пров.` : v.count], [fmt(v.kg_m3, 1)], [fmt(util, 2)], [v.util_punch ? fmt(v.util_punch, 2) : '—'], [fmt(v.s_max * 100, 1)], [fmt(v.ds_rel, 4)],
+      [v.over_fd, v.over_fd > 0], [v.over_12fd, v.over_12fd > 0], [fmt(v.demand_max, 2), v.demand_max > 1.2], [v.util_punch_struct ? fmt(v.util_punch_struct, 2) : '—', v.util_punch_struct > 1]];
+    for (const [text, warn] of cells) {
+      const td = tr.insertCell(); td.textContent = text; td.className = warn ? 'num warn' : 'num';
     }
     tr.title = v.reference ? 'Существующая расстановка (сваи приведены к узлам сетки плиты)' : (v.shift != null ? `Среднее смещение от существующих свай ${fmt(v.shift, 2)} м` : '');
     tr.onclick = () => select(i);
@@ -170,7 +175,7 @@ function variantTable() {
   const vs = designVariants();
   const feasible = vs.filter((v) => v.feasible);
   let note = feasible.length
-    ? `Допустимых вариантов: ${feasible.length}. Меньше ${feasible[feasible.length - 1].count} свай — нарушается ${limiting(vs)}.`
+    ? `Допустимых вариантов: ${feasible.length}. Меньше ${feasible[feasible.length - 1].count} свай — нарушается ${limiting(vs)}. ${state.input.pile_fu ? 'Перегрузка свай по грунту (>Fd — упругий спрос до перераспределения по Fu) — справочно, не отсекает варианты.' : 'Предел Fu не задан: N ≤ Fd — условие допустимости.'}`
     : `Допустимого варианта нет: ${reasons(vs[0]).join(', ')}.`;
   const ref = state.result.variants.find((v) => v.reference);
   if (ref) note += ref.feasible ? ' Существующая расстановка допустима.' : ` Существующая расстановка: ${reasons(ref).join(', ')}.`;
@@ -179,9 +184,10 @@ function variantTable() {
 
 function reasons(v) {
   const r = [];
-  if (v.util_ground > 1) r.push(`нагрузка на сваю ${fmt(v.util_ground, 2)}·Fd`);
+  if (v.util_ground > 1 && !state.input.pile_fu) r.push(`нагрузка на сваю ${fmt(v.util_ground, 2)}·Fd (предел Fu не задан)`);
   if (v.util_material > 1) r.push(`прочность сваи по материалу (Кисп ${fmt(v.util_material, 2)})`);
-  if (v.util_punch > 1) r.push(`продавливание плиты (Кисп ${fmt(v.util_punch, 2)})`);
+  if (v.util_punch > 2) r.push(`продавливание плиты сваей (Кисп ${fmt(v.util_punch, 2)} > 2)`);
+  if (v.util_punch_struct > 2) r.push(`продавливание плиты конструкциями (Кисп ${fmt(v.util_punch_struct, 2)} > 2)`);
   if (v.s_max > state.input.s_max) r.push(`осадка ${fmt(v.s_max * 100, 1)} см`);
   if (v.ds_rel > state.input.ds_rel) r.push(`Δs/L = ${fmt(v.ds_rel, 4)}`);
   if (v.design_impossible) r.push('армирование плиты не подбирается (мала толщина)');
@@ -191,7 +197,7 @@ function reasons(v) {
 function limiting(vs) {
   const v = vs[vs.length - 1];
   const lim = state.input;
-  const terms = [[v.util_ground, 'несущая способность свай по грунту'], [v.util_material, 'прочность свай по материалу'], [v.util_punch, 'продавливание плиты'],
+  const terms = [[lim.pile_fu ? 0 : v.util_ground, 'несущая способность свай по грунту'], [v.util_material, 'прочность свай по материалу'], [v.util_punch / 2, 'продавливание плиты сваей'], [v.util_punch_struct / 2, 'продавливание плиты конструкциями'],
     [v.s_max / lim.s_max, 'предел осадки'], [v.ds_rel / lim.ds_rel, 'предел Δs/L']];
   return terms.sort((a, b) => b[0] - a[0])[0][1];
 }
@@ -201,12 +207,13 @@ function pileTable() {
   tbody.replaceChildren();
   const v = state.result.variants[state.current];
   if (!v) return;
-  const order = v.piles.map((p, i) => i).sort((a, b) => v.piles[b].n - v.piles[a].n);
+  const order = v.piles.map((p, i) => i).sort((a, b) => v.piles[b].demand - v.piles[a].demand);
   for (const i of order) {
     const p = v.piles[i];
     const tr = tbody.insertRow();
-    const k = p.n / state.result.fd;
-    for (const [text, cls] of [[i + 1, 'num'], [fmt(p.x, 2), 'num'], [fmt(p.y, 2), 'num'], [fmt(p.n, 0), 'num'], [fmt(k, 2), k > 1 ? 'num over' : 'num']]) {
+    const k = p.demand / state.result.fd;
+    tr.title = p.capped ? 'На пределе Fu: держит Fu, избыток перераспределён' : '';
+    for (const [text, cls] of [[i + 1, 'num'], [fmt(p.x, 2), 'num'], [fmt(p.y, 2), 'num'], [fmt(p.n, 0) + (p.capped ? ' Fu' : ''), 'num'], [fmt(k, 2), k > 1 ? 'num over' : 'num']]) {
       const td = tr.insertCell(); td.textContent = text; td.className = cls;
     }
   }
@@ -227,8 +234,15 @@ function render(refit = false) {
   const r = R.d / 2;
   if (state.mode === 'piles') {
     const fd = R.fd;
-    scene.piles = v.piles.map((p, i) => ({ x: p.x, y: p.y, r, fill: color(p.n / fd), over: p.n > fd, title: `Свая ${i + 1}: N = ${fmt(p.n, 0)} кН, N/Fd = ${fmt(p.n / fd, 2)}` }));
-    legend('Нагрузка на сваю N/Fd', '0', '1', '', `Fd = ${fmt(fd, 0)} кН; красная обводка — больше Fd${R.existing.length ? '; пунктир — существующие сваи' : ''}`);
+    const lab = $('pile-label').value;
+    scene.piles = v.piles.map((p, i) => {
+      const k = p.demand / fd;
+      return { x: p.x, y: p.y, r, fill: classColor(k), over: p.capped, label: lab === 'k' ? fmt(k, 2) : lab === 'n' ? fmt(p.n, 0) : '',
+        title: `Свая ${i + 1}: N = ${fmt(p.n, 0)} кН${p.capped ? ' (на пределе Fu)' : ''}, упругий спрос N/Fd = ${fmt(k, 2)}` };
+    });
+    $('legend').hidden = false;
+    $('legend').innerHTML = `<div class="title">Нагрузка на сваю N/Fd (упругий спрос)</div><div class="classes">${CLASSES.map((c) => `<span><i style="background:${c[1]}"></i>${c[2]}</span>`).join('')}</div>`
+      + `<div class="note">Fd = ${fmt(fd, 0)} кН; красная обводка — на пределе Fu${R.existing.length ? '; пунктир — существующие сваи' : ''}</div>`;
   } else if (state.mode === 'settlement') {
     const cellW = R.elements.map((e) => e.reduce((s, n) => s + v.w[n], 0) / e.length);
     const lo = Math.min(...cellW), hi = Math.max(...cellW);
@@ -253,9 +267,10 @@ function checksTable() {
   if (!v) return;
   const lim = state.input;
   const rows = [
-    ['Нагрузка на сваю N/Fd', fmt(v.util_ground, 2), '1,00', v.util_ground <= 1],
+    [`Нагрузка на сваю N/Fd${lim.pile_fu ? ' (справочно)' : ''}`, `${fmt(v.demand_max, 2)}; >Fd: ${v.over_fd}, >1,2Fd: ${v.over_12fd}${v.capped_count ? `, на Fu: ${v.capped_count}` : ''}`, lim.pile_fu ? '' : '1,00', lim.pile_fu ? true : v.demand_max <= 1],
     ['Свая по материалу, Кисп', fmt(v.util_material, 2), '1,00', v.util_material <= 1],
-    ['Продавливание плиты, Кисп', v.util_punch ? fmt(v.util_punch, 2) : 'не проверялось', '1,00', v.util_punch <= 1],
+    ['Продавливание сваей, Кисп', v.util_punch ? fmt(v.util_punch, 2) : 'не проверялось', '2,00', v.util_punch <= 2],
+    ['Продавливание конструкциями, Кисп', v.util_punch_struct ? fmt(v.util_punch_struct, 2) : 'не проверялось', '2,00', v.util_punch_struct <= 2],
     ['Осадка, см', fmt(v.s_max * 100, 1), fmt(lim.s_max * 100, 1), v.s_max <= lim.s_max],
     ['Разность осадок Δs/L', fmt(v.ds_rel, 4), fmt(lim.ds_rel, 4), v.ds_rel <= lim.ds_rel],
     ['Армирование плиты', v.design_impossible ? 'не подбирается' : `${fmt(v.kg_m3, 1)} кг/м³`, '', !v.design_impossible],
@@ -277,7 +292,7 @@ function select(i) {
   render();
   $('export-csv').disabled = $('export-dxf').disabled = $('export-rebar').disabled = $('export-report').disabled = i < 0;
   const v = state.result.variants[i];
-  $('subtitle').textContent = `${v.reference ? 'существующая: ' : ''}${v.count} свай, ${fmt(v.kg_m3, 1)} кг/м³`;
+  $('subtitle').textContent = `${v.reference ? 'существующая: ' : v.checked ? 'проверка: ' : ''}${v.count} свай, ${fmt(v.kg_m3, 1)} кг/м³`;
 }
 
 // ── Действия ──
@@ -301,6 +316,40 @@ $('run').onclick = async () => {
     select(feasible.length ? result.variants.indexOf(feasible[feasible.length - 1]) : result.variants.findIndex((v) => !v.reference));
     render(true);
     status(`Рассчитано вариантов: ${result.variants.length}, ${fmt((performance.now() - t) / 1000, 1)} с`);
+  } catch (e) {
+    status(`Ошибка: ${e.message ?? e}`, true);
+  }
+};
+
+// Проверка заданной расстановки: координаты (по умолчанию — выбранный вариант) → расчёт без
+// подбора; на тех же исходных данных результат добавляется к вариантам.
+$('check').onclick = () => {
+  const v = state.result?.variants[state.current];
+  $('check-text').value = v ? v.piles.map((p) => `${fmt(p.x, 3)}; ${fmt(p.y, 3)}`).join('\n') : '';
+  $('check-dialog').hidden = false;
+};
+$('check-cancel').onclick = () => { $('check-dialog').hidden = true; };
+$('check-run').onclick = async () => {
+  let input;
+  try { input = collect(); } catch (e) { return status(e.message, true); }
+  const piles = [];
+  for (const line of $('check-text').value.split('\n')) {
+    if (!line.trim()) continue;
+    const xy = line.trim().split(/[;\s]+/).map((t) => Number(t.replace(',', '.')));
+    if (xy.length < 2 || xy.some((x) => !Number.isFinite(x))) return status(`Не разобрана строка: «${line}»`, true);
+    piles.push([xy[0], xy[1]]);
+  }
+  if (!piles.length) return status('Не задано ни одной сваи', true);
+  $('check-dialog').hidden = true;
+  try {
+    const t = performance.now();
+    const result = await busy('Проверка…', () => call('check_piles', { input, piles }));
+    state.input = input;
+    state.result = result;
+    select(result.variants.length - 1);
+    render(true);
+    const notes = result.check_notes || [];
+    status(`Проверено: ${result.variants[result.variants.length - 1].count} свай из ${piles.length}, ${fmt((performance.now() - t) / 1000, 1)} с${notes.length ? '. ' + notes.join('; ') : ''}`, notes.length > 0);
   } catch (e) {
     status(`Ошибка: ${e.message ?? e}`, true);
   }
@@ -341,6 +390,7 @@ for (const b of $('mode').querySelectorAll('button')) {
   };
 }
 $('rebar-dir').onchange = () => render();
+$('pile-label').onchange = () => render();
 
 for (const b of $('layout').querySelectorAll('button')) {
   b.onclick = () => {

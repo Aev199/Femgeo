@@ -22,6 +22,7 @@
     <span class="appbar__sep"></span>
     <div class="appbar__group">
       <button id="run" class="primary" title="Подобрать расстановку свай: фронт вариантов «число свай — расход арматуры»">Рассчитать</button>
+      <button id="check" title="Расчёт заданной расстановки без подбора: координаты свай (по умолчанию — выбранный вариант)">Проверить расстановку…</button>
     </div>
     <span class="appbar__spacer"></span>
     <div class="appbar__group">
@@ -120,6 +121,11 @@
           <button data-mode="settlement">Осадки</button>
           <button data-mode="rebar">Армирование</button>
         </div>
+        <select id="pile-label" title="Подпись у свай">
+          <option value="">без подписи</option>
+          <option value="k">N/Fd</option>
+          <option value="n">N, кН</option>
+        </select>
         <select id="rebar-dir" hidden title="Направление и грань">
           <option value="2">низ, X</option>
           <option value="3">низ, Y</option>
@@ -136,7 +142,7 @@
       <h3 class="panel-title">Варианты</h3>
       <div class="table-wrap variants">
         <table class="dialog__table" id="variants">
-          <thead><tr><th>Свай</th><th title="Теоретический расход арматуры плиты">кг/м³</th><th title="Наибольший коэффициент использования сваи по грунту и материалу">Кисп</th><th title="Продавливание плиты сваей">Прод.</th><th>s, см</th><th>Δs/L</th></tr></thead>
+          <thead><tr><th>Свай</th><th title="Теоретический расход арматуры плиты">кг/м³</th><th title="Наибольший коэффициент использования сваи по грунту и материалу">Кисп</th><th title="Продавливание плиты сваей">Прод.</th><th>s, см</th><th>Δs/L</th><th title="Сваи с упругим спросом N > Fd (до перераспределения по пределу Fu)">&gt;Fd</th><th title="Сваи с N > 1,2·Fd">&gt;1,2Fd</th><th title="Наибольший упругий спрос N/Fd">max N/Fd</th><th title="Продавливание конструкциями (колонны, торцы и углы стен), Кисп; ≤ 2 — с поперечной арматурой">Прод. к.</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -146,7 +152,7 @@
       <h3 class="panel-title">Сваи выбранного варианта</h3>
       <div class="table-wrap piles">
         <table class="dialog__table" id="piles">
-          <thead><tr><th>№</th><th>X, м</th><th>Y, м</th><th>N, кН</th><th>N/Fd</th></tr></thead>
+          <thead><tr><th>№</th><th>X, м</th><th>Y, м</th><th title="Фактическая (после перераспределения по Fu)">N, кН</th><th title="Упругий спрос N/Fd">N/Fd</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -154,6 +160,12 @@
   </main>
 
   <footer class="statusbar"><span id="status">Готово</span></footer>
+  <div id="check-dialog" hidden><div class="box">
+    <b>Проверить расстановку</b>
+    <span class="hint">Сваи по строкам: X; Y (м). Точки приводятся к ближайшим узлам сетки плиты.</span>
+    <textarea id="check-text" spellcheck="false"></textarea>
+    <div class="row"><button id="check-cancel">Отмена</button><button id="check-run" class="primary">Пересчитать</button></div>
+  </div></div>
   <div id="busy" hidden><div class="box" id="busy-text">Расчёт…</div></div>
   <script type="module" src="./src/main.js"></script>
 </body>

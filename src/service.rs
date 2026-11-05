@@ -122,6 +122,9 @@ pub struct Input {
     /// "conditional" — одинаковая, по осадке условного фундамента (нужны γ и φ слоёв).
     #[serde(default = "sp24")]
     pub pile_model: String,
+    /// Проверить заданную расстановку (X, Y) без подбора; None — подбор.
+    #[serde(default)]
+    pub check: Option<Vec<[f64; 2]>>,
 }
 
 fn acrc_long() -> f64 {
@@ -284,6 +287,11 @@ pub struct Service {
     last_mesh: Option<LastMesh>,
     /// Армирование подземной части последнего варианта: полная модель и поля, м²/м.
     last_underground: Option<(Model, Vec<[f64; 4]>)>,
+    /// Подготовка последнего расчёта (K0, u0, G) и ключ исходных данных: проверка другой
+    /// расстановки на тех же данных не пересчитывает модель без свай.
+    prepared: Option<(u64, crate::optimize::Prepared)>,
+    /// Номер первого варианта, добавленного проверкой заданной расстановки (`usize::MAX` — нет).
+    checked_from: usize,
 }
 
 struct LastMesh {
@@ -309,6 +317,12 @@ impl Service {
             "defaults" => Ok(serde_json::to_value(default_input()).unwrap()),
             "open_geobase" => self.open_geobase(&args),
             "run" => self.run(args, progress),
+            // Проверка заданной расстановки: те же исходные данные, что у расчёта, и `piles` [[x, y]].
+            "check_piles" => {
+                let mut input = args.get("input").cloned().ok_or("нет исходных данных")?;
+                input["check"] = args.get("piles").cloned().ok_or("нет расстановки свай")?;
+                self.run(input, progress)
+            }
             "export_csv" => self.export(&args, false),
             "export_dxf" => self.export(&args, true),
             "export_rebar_dxf" => self.export_rebar(&args),
@@ -410,7 +424,9 @@ impl Service {
                 input.raft.holes = s.region.holes.clone();
                 input.raft.h = s.h;
                 input.raft.z_bottom = s.z_mid - s.h / 2.0;
-                input.existing.extend(s.piles.iter().map(|p| p.0));
+                if input.check.is_none() {
+                    input.existing.extend(s.piles.iter().map(|p| p.0));
+                }
                 Some(s)
             }
             None => None,
@@ -625,7 +641,26 @@ impl Service {
             let c = r.outline.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n]);
             soil(c[0], c[1]).top
         };
-        let problem = Problem {
+        // Ключ подготовки: исходные данные без расстановки и сетка здания.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            let mut i = serde_json::to_value(&input).unwrap_or_default();
+            for k in ["check", "existing", "layout"] {
+                i[k] = Value::Null;
+            }
+            i.to_string().hash(&mut h);
+            if let Some(m) = mesh {
+                m.nodes.iter().flatten().chain(m.cases.iter().flatten().flat_map(|(_, f)| f.iter())).for_each(|x| x.to_bits().hash(&mut h));
+                (m.nodes.len(), m.shells.len(), m.beams.len(), m.raft.len()).hash(&mut h);
+            }
+            h.finish()
+        };
+        let (cache, same) = match self.prepared.take() {
+            Some((k, p)) if k == key => (std::cell::OnceCell::from(p), true),
+            _ => (Default::default(), false),
+        };
+        let mut problem = Problem {
             raft: raft.clone(),
             pile_head: r.z_bottom,
             pile: PileType {
@@ -654,7 +689,7 @@ impl Service {
             pile_fu: input.pile_fu,
             conditional,
             structure_punch,
-            cache: Default::default(),
+            cache,
         };
         // Начальное число свай — по суммарной нагрузке и Fd с запасом 1,5.
         // Наибольшая суммарная расчётная нагрузка по сочетаниям ПС1.
@@ -664,29 +699,56 @@ impl Service {
             .map(|c| c.iter().zip(&case_total).map(|(f, t)| f * t).sum::<f64>())
             .fold(0.0, f64::max);
         let n_start = ((1.5 * total / pi.fd).ceil() as usize).max(4);
-        progress("подбор расстановки");
-        let mut report = |e: &crate::optimize::Evaluation| progress(&format!("вариант: {} свай, {:.1} кг/м³", e.piles.len(), e.kg_m3));
-        let mut variants = if input.layout == "free" { problem.frontier(n_start, 8, &mut report)? } else { problem.regular(&mut report)? };
-        // Существующая расстановка — первой строкой, для сравнения.
-        let reference = problem.reference()?;
-        let has_reference = reference.is_some();
-        if let Some(r) = reference {
-            variants.insert(0, r);
-        }
+        let mut check_notes = None;
+        let (variants, has_reference) = if let Some(pts) = &input.check {
+            progress("проверка расстановки");
+            let (ev, notes) = problem.check(pts)?;
+            check_notes = Some(notes);
+            // На тех же исходных данных — добавляется к вариантам последнего расчёта.
+            match self.last.take() {
+                Some((_, _, mut vs)) if same => {
+                    if self.checked_from > vs.len() {
+                        self.checked_from = vs.len();
+                    }
+                    vs.push(ev);
+                    (vs, self.last_reference)
+                }
+                _ => {
+                    self.checked_from = 0;
+                    (vec![ev], false)
+                }
+            }
+        } else {
+            progress("подбор расстановки");
+            let mut report = |e: &crate::optimize::Evaluation| progress(&format!("вариант: {} свай, {:.1} кг/м³", e.piles.len(), e.kg_m3));
+            let mut variants = if input.layout == "free" { problem.frontier(n_start, 8, &mut report)? } else { problem.regular(&mut report)? };
+            // Существующая расстановка — первой строкой, для сравнения.
+            let reference = problem.reference()?;
+            let has_reference = reference.is_some();
+            if let Some(r) = reference {
+                variants.insert(0, r);
+            }
+            (variants, has_reference)
+        };
         let mut out = result_json(&raft, &variants, &input, has_reference);
+        if let Some(n) = check_notes {
+            out["check_notes"] = json!(n);
+        } else {
+            self.checked_from = usize::MAX;
+        }
+        for (i, v) in out["variants"].as_array_mut().unwrap().iter_mut().enumerate() {
+            v["checked"] = json!(i >= self.checked_from);
+        }
         if let Some(s) = &split {
             out["notes"] = json!(s.notes);
-            // Вертикальные конструкции: узлы сопряжения здания с плитой (X, Y).
-            let mut st: Vec<[f64; 2]> = s.building.as_ref().map_or(vec![], |b| b.block.dofs.iter().step_by(3).map(|d| { let p = s.raft.nodes[d / 6]; [p[0], p[1]] }).collect());
-            st.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
-            st.dedup();
-            out["structures"] = json!(st);
+            out["structures"] = json!(structure_points(s));
         }
         self.last_mesh = split.map(|s| {
             let building_cases = s.building_cases.iter().zip(&norms).map(|(lc, &k)| LoadCase { nodal: lc.nodal.iter().map(|&(n, f)| (n, f.map(|x| x * k))).collect(), pressure: vec![] }).collect();
             LastMesh { split: s, to_grid, raft_cases: raft_cases_norm, building_cases, combos, ground, building: building.clone() }
         });
         self.last_underground = None;
+        self.prepared = problem.take_prepared().map(|p| (key, p));
         self.last = Some((input, raft, variants));
         self.last_reference = has_reference;
         Ok(out)
@@ -751,6 +813,14 @@ fn polygon_area(p: &[[f64; 2]]) -> f64 {
     (0..n).map(|i| p[i][0] * p[(i + 1) % n][1] - p[(i + 1) % n][0] * p[i][1]).sum::<f64>().abs() / 2.0
 }
 
+/// Вертикальные конструкции: узлы сопряжения здания с плитой (X, Y).
+fn structure_points(s: &crate::building::Split) -> Vec<[f64; 2]> {
+    let mut st: Vec<[f64; 2]> = s.building.as_ref().map_or(vec![], |b| b.block.dofs.iter().step_by(3).map(|d| { let p = s.raft.nodes[d / 6]; [p[0], p[1]] }).collect());
+    st.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    st.dedup();
+    st
+}
+
 fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bool) -> Value {
     json!({
         "nodes": raft.nodes.iter().map(|p| [p[0], p[1]]).collect::<Vec<_>>(),
@@ -777,8 +847,12 @@ fn result_json(raft: &Model, vs: &[Evaluation], input: &Input, has_reference: bo
             "design_impossible": v.design_impossible,
             "capped": v.capped,
             "capped_share": v.capped_share,
+            "capped_count": v.pile_capped.iter().filter(|&&c| c).count(),
+            "over_fd": v.over(input.pile.fd, 1.0),
+            "over_12fd": v.over(input.pile.fd, 1.2),
+            "demand_max": v.pile_demand.iter().copied().fold(0.0, f64::max) / input.pile.fd,
             "conditional": v.conditional.as_ref().map(|c| json!({ "s": c.s, "p": c.p, "area": c.area, "phi_mt": c.phi_mt, "hc": c.hc })),
-            "piles": v.piles.iter().zip(&v.pile_n).map(|(&n, &f)| json!({ "x": raft.nodes[n][0], "y": raft.nodes[n][1], "n": f })).collect::<Vec<_>>(),
+            "piles": v.piles.iter().enumerate().map(|(i, &n)| json!({ "x": raft.nodes[n][0], "y": raft.nodes[n][1], "n": v.pile_n[i], "demand": v.pile_demand[i], "capped": v.pile_capped[i] })).collect::<Vec<_>>(),
             // см²/м
             "rebar": v.rebar.iter().map(|a| a.map(|x| x * 1e4)).collect::<Vec<_>>(),
             "w": v.w_nodes,
@@ -859,6 +933,7 @@ pub fn default_input() -> Input {
         existing: vec![],
         pile_fu: None,
         pile_model: sp24(),
+        check: None,
     }
 }
 

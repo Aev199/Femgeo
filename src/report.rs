@@ -73,8 +73,8 @@ fn plan_svg(input: &Input, raft: &Model, v: &Evaluation) -> String {
         );
     }
     for (k, (&n, &nf)) in v.piles.iter().zip(&v.pile_n).enumerate() {
-        let u = nf / input.pile.fd;
-        let c = if u > 1.0 { "#c62828" } else if u > 0.9 { "#ef8f00" } else { "#2e7d32" };
+        let u = v.pile_demand[k] / input.pile.fd;
+        let c = pile_class(u);
         let (x, y) = (raft.nodes[n][0], y0 + y1 - raft.nodes[n][1]);
         s += &format!(
             "<circle cx=\"{x:.3}\" cy=\"{y:.3}\" r=\"{r:.3}\" fill=\"{c}\"><title>№{} N = {} кН</title></circle>\n",
@@ -83,6 +83,11 @@ fn plan_svg(input: &Input, raft: &Model, v: &Evaluation) -> String {
         );
     }
     s + "</svg>"
+}
+
+/// Цвет сваи по упругому спросу N/Fd: ≤ 0,8 / ≤ 1,0 / ≤ 1,2 / > 1,2.
+fn pile_class(u: f64) -> &'static str {
+    if u > 1.2 { "#d63b2f" } else if u > 1.0 { "#ee8a26" } else if u > 0.8 { "#e3c22b" } else { "#3aa655" }
 }
 
 pub fn html(input: &Input, raft: &Model, vs: &[Evaluation], i: usize, reference: bool) -> String {
@@ -181,6 +186,15 @@ pub fn html(input: &Input, raft: &Model, vs: &[Evaluation], i: usize, reference:
     let lim = |name: &str, val: String, util: f64| format!("<tr><th>{}</th><td{}>{}</td><td{} class=n>{}</td></tr>\n", name, ok(util), val, ok(util), f(util, 2));
     s += "<tr><th>Проверка</th><th>Значение</th><th>Кисп</th></tr>\n";
     s += &lim("Свая по грунту", format!("Nmax = {} кН", f(v.pile_n.iter().cloned().fold(0.0, f64::max), 0)), v.util_ground);
+    let demand = v.pile_demand.iter().cloned().fold(0.0, f64::max);
+    let capped = v.pile_capped.iter().filter(|&&c| c).count();
+    s += &format!(
+        "<tr><th>Перегрузка свай (упругий спрос, справочно)</th><td>N &gt; Fd: {}, N &gt; 1,2·Fd: {}{}</td><td class=n>{}</td></tr>\n",
+        v.over(p.fd, 1.0),
+        v.over(p.fd, 1.2),
+        if capped > 0 { format!(", на пределе Fu: {capped}") } else { String::new() },
+        f(demand / p.fd, 2)
+    );
     s += &lim("Свая по материалу", "—".into(), v.util_material);
     s += &lim("Осадка", format!("{} м", f(v.s_max, 3)), v.s_max / input.s_max);
     s += &lim("Относительная разность осадок", f(v.ds_rel, 5), v.ds_rel / input.ds_rel);
@@ -204,11 +218,11 @@ pub fn html(input: &Input, raft: &Model, vs: &[Evaluation], i: usize, reference:
         f(v.kg_m3, 1)
     );
 
-    s += "<h2>4. План свай</h2>\n<p>Цвет: зелёный — N ≤ 0,9Fd, оранжевый — до Fd, красный — больше Fd; крестики — существующие сваи.</p>\n";
+    s += "<h2>4. План свай</h2>\n<p>Цвет по упругому спросу N/Fd (до перераспределения по пределу Fu): зелёный — ≤ 0,8, жёлтый — до 1,0, оранжевый — до 1,2, красный — больше 1,2; крестики — существующие сваи.</p>\n";
     s += &plan_svg(input, raft, v);
-    s += "\n<h2>5. Ведомость свай</h2>\n<table><tr><th>№</th><th>X, м</th><th>Y, м</th><th>N, кН</th><th>N/Fd</th></tr>\n";
+    s += "\n<h2>5. Ведомость свай</h2>\n<table><tr><th>№</th><th>X, м</th><th>Y, м</th><th>N, кН</th><th>N/Fd (упругий спрос)</th></tr>\n";
     for (k, (&n, &nf)) in v.piles.iter().zip(&v.pile_n).enumerate() {
-        let u = nf / p.fd;
+        let u = v.pile_demand[k] / p.fd;
         s += &format!(
             "<tr><td>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n{}>{}</td></tr>\n",
             k + 1,
@@ -221,17 +235,19 @@ pub fn html(input: &Input, raft: &Model, vs: &[Evaluation], i: usize, reference:
     }
     s += "</table>\n";
     if vs.len() > 1 {
-        s += "<h2>6. Сравнение вариантов</h2>\n<table><tr><th></th><th>Свай</th><th>кг/м³</th><th>Кисп грунт</th><th>Кисп матер.</th><th>Осадка, м</th><th>Допустим</th></tr>\n";
+        s += "<h2>6. Сравнение вариантов</h2>\n<table><tr><th></th><th>Свай</th><th>кг/м³</th><th>Кисп грунт</th><th>Кисп матер.</th><th>&gt;Fd</th><th>&gt;1,2Fd</th><th>Осадка, м</th><th>Допустим</th></tr>\n";
         for (k, e) in vs.iter().enumerate() {
             let label = if reference && k == 0 { "существ.".into() } else { (if reference { k } else { k + 1 }).to_string() };
             s += &format!(
-                "<tr{}><td>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td>{}</td></tr>\n",
+                "<tr{}><td>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td class=n>{}</td><td>{}</td></tr>\n",
                 if k == i { " style=\"background:#eef5ff\"" } else { "" },
                 label,
                 e.piles.len(),
                 f(e.kg_m3, 1),
                 f(e.util_ground, 2),
                 f(e.util_material, 2),
+                e.over(p.fd, 1.0),
+                e.over(p.fd, 1.2),
                 f(e.s_max, 3),
                 if e.feasible { "да" } else { "нет" }
             );

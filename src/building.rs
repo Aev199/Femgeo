@@ -103,6 +103,8 @@ fn boundary(nodes: &[V3], shells: &[Shell]) -> Result<Region, String> {
             next.entry(b).or_default().push(a);
         }
     }
+    // Порядок соседей — детерминированный (направление обхода не зависит от HashMap).
+    next.values_mut().for_each(|v| v.sort_unstable());
     if next.values().any(|v| v.len() != 2) {
         return Err("плита: граница не распадается на простые контуры (касание в узле или неконформная сетка)".into());
     }
